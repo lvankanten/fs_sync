@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__freshservice-mcp__filter_agents",
+      "mcp__freshservice-mcp__get_all_agents",
+      "mcp__freshservice-mcp__filter_tickets",
+      "mcp__freshservice-mcp__get_tickets",
+      "Bash(python:*)",
+      "Bash(pip install:*)",
+      "Bash(python3:*)",
+      "Bash(perl -ne 'if \\(/Filter Tickets/i .. /<h2|<h3/\\) { print if /<td>/ }' \"C:/Users/lvankanten/FreshService+/Service Desk API for Developers _ Freshservice.html\")",
+      "Bash(findstr '/C:Filter Tickets' 'C:/Users/lvankanten/FreshService+/Service Desk API for Developers _ Freshservice.html')",
+      "Bash(tr '>' '\\\\n')",
+      "Bash(tr '<' '\\\\n')",
+      "Bash(perl -0777 -ne 'if \\(/<div id=\"\"\"\"filter_tickets\"\"\"\".*?<div id=\"\"\"\"filter_releases\"\"\"\"/s\\) { print $& }')"
+    ]
+  },
+  "disabledMcpjsonServers": [
+    "youtube-transcript"
+  ]
+}
