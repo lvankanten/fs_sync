@@ -11,6 +11,10 @@ Filter query syntax (passed to get_tickets_by_query / translate_query):
   id:in(12345,12346)              fetch specific tickets by ID
   id:range(12340,12350)           fetch inclusive ID range
   status:not(Closed) AND agent_id:12345 AND tag:'Project'   combined
+
+Client-side pseudo-filters (stripped from API query, applied after fetch):
+  planned_effort:empty            field is null, empty string, or 0
+  planned_effort:not_empty        field has a truthy value
 """
 import re
 import time
@@ -43,7 +47,8 @@ STANDARD_FIELDS = {
     'subject', 'description', 'type', 'source', 'category',
     'sub_category', 'item_category', 'department_id', 'urgency',
     'impact', 'tags', 'problem', 'change_initiating_ticket',
-    'change_initiated_by_ticket',
+    'change_initiated_by_ticket', 'planned_effort',
+    'planned_start_date', 'planned_end_date',
 }
 
 
@@ -54,6 +59,51 @@ def _expand_statuses(names):
         if key in STATUS_MAP:
             parts.append(f'status:{STATUS_MAP[key]}')
     return '(' + ' OR '.join(parts) + ')' if parts else ''
+
+
+def _extract_client_filters(query):
+    """Strip field:empty / field:not_empty pseudo-filters from query.
+
+    Returns (cleaned_query, list_of_filter_funcs).
+    Each filter func takes a ticket dict and returns True to keep it.
+    """
+    filters = []
+
+    def _replace_empty(m):
+        field = m.group(1)
+        filters.append(lambda t, f=field: not _resolve_field(t, f))
+        return ''
+
+    def _replace_not_empty(m):
+        field = m.group(1)
+        filters.append(lambda t, f=field: bool(_resolve_field(t, f)))
+        return ''
+
+    query = re.sub(r'(\w+):not_empty\b', _replace_not_empty, query, flags=re.IGNORECASE)
+    query = re.sub(r'(\w+):empty\b', _replace_empty, query, flags=re.IGNORECASE)
+
+    # Clean up dangling AND operators left after stripping
+    query = re.sub(r'\s+AND\s+AND\s+', ' AND ', query, flags=re.IGNORECASE)
+    query = re.sub(r'^\s*AND\s+', '', query, flags=re.IGNORECASE)
+    query = re.sub(r'\s+AND\s*$', '', query, flags=re.IGNORECASE)
+    query = query.strip()
+
+    return query, filters
+
+
+def _resolve_field(ticket, field):
+    """Look up a field value, checking top-level then custom_fields."""
+    if field in ticket:
+        return ticket[field]
+    custom = ticket.get('custom_fields') or {}
+    return custom.get(field)
+
+
+def _apply_client_filters(tickets, filters):
+    """Apply client-side filter functions to a ticket list."""
+    for f in filters:
+        tickets = [t for t in tickets if f(t)]
+    return tickets
 
 
 def translate_query(query):
@@ -181,10 +231,14 @@ class FreshserviceClient:
         The query is translated (status names → codes) before being sent to the API.
         Supports id: shortcuts: id:12345, id:in(1,2,3), id:range(1,10)
         Combined: id:in(1,2) AND status:not(Closed)
+        Client-side pseudo-filters: field:empty, field:not_empty
 
         Returns (tickets, total).
         """
         q = query.strip()
+
+        # Extract client-side pseudo-filters before any other processing
+        q, client_filters = _extract_client_filters(q)
 
         # Combined: id:... AND <rest>
         m = re.match(r'^(id:(?:\d+|in\([^)]+\)|range\(\d+,\d+\)))\s+AND\s+(.+)$', q, re.IGNORECASE)
@@ -194,12 +248,14 @@ class FreshserviceClient:
             tickets = self._fetch_by_ids(ids)
             if allowed:
                 tickets = [t for t in tickets if t.get('status') in allowed]
+            tickets = _apply_client_filters(tickets, client_filters)
             return tickets, len(tickets)
 
         # id-only
         ids = self._ids_from_id_part(q)
         if ids:
             tickets = self._fetch_by_ids(ids)
+            tickets = _apply_client_filters(tickets, client_filters)
             return tickets, len(tickets)
 
         # Normal filter query
@@ -224,7 +280,8 @@ class FreshserviceClient:
             if len(tickets) >= total or not batch:
                 break
             page += 1
-        return tickets, total
+        tickets = _apply_client_filters(tickets, client_filters)
+        return tickets, len(tickets)
 
     def _ids_from_id_part(self, id_part):
         m = re.match(r'^id:(\d+)$', id_part, re.IGNORECASE)
@@ -251,13 +308,39 @@ class FreshserviceClient:
         matches = re.findall(r'status:(\d+)', translated_query)
         return {int(m) for m in matches} if matches else None
 
-    def get_ticket(self, ticket_id):
-        return self._get(f'/tickets/{ticket_id}')['ticket']
+    def get_ticket(self, ticket_id, include=None):
+        params = {'include': include} if include else None
+        return self._get(f'/tickets/{ticket_id}', params=params)['ticket']
 
     def get_ticket_sample(self):
         data = self._get('/tickets', params={'page': 1, 'per_page': 1})
         tickets = data.get('tickets', [])
         return tickets[0] if tickets else {}
+
+    def get_conversations(self, ticket_id):
+        """Fetch all conversations for a ticket."""
+        return self._get(f'/tickets/{ticket_id}/conversations').get('conversations', [])
+
+    def get_ticket_activities(self, ticket_id):
+        """Fetch the first page of activities for a ticket (newest-first)."""
+        return self._get(f'/tickets/{ticket_id}/activities').get('activities', [])
+
+    def get_agent_name(self, agent_id):
+        """Return 'First Last' for an agent ID, cached per client instance."""
+        if not hasattr(self, '_agent_name_cache'):
+            self._agent_name_cache = {}
+        if agent_id not in self._agent_name_cache:
+            try:
+                agent = self._get(f'/agents/{agent_id}').get('agent', {})
+                name = f"{agent.get('first_name', '')} {agent.get('last_name', '')}".strip()
+            except FreshserviceError:
+                name = ''
+            self._agent_name_cache[agent_id] = name
+        return self._agent_name_cache[agent_id]
+
+    def update_custom_fields(self, ticket_id, fields):
+        """Write custom field values to a ticket. fields = {field_name: value}."""
+        self._put(f'/tickets/{ticket_id}', {'custom_fields': fields})
 
     def update_ticket(self, ticket_id, fields):
         """Update a ticket. None values are sent as JSON null.

@@ -315,8 +315,15 @@ def update(args_in, agent, agent_id, group, group_id, query, yes):
             try:
                 client.update_ticket(t['id'], fields)
                 success += 1
-            except FreshserviceError:
+            except FreshserviceError as e:
                 errors += 1
+                console.print(f'  [red]#{t["id"]} failed:[/red] {e}')
+                if e.details:
+                    for err in e.details:
+                        console.print(f'    [dim]{err}[/dim]')
+                if errors >= 3 and success == 0:
+                    console.print('[red]All updates failing — aborting.[/red]')
+                    break
 
     if errors:
         console.print(f'[green]Updated {success} ticket(s)[/green], [red]{errors} failed[/red]')
