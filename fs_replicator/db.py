@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime, timezone
 
-import pyodbc
+import pymssql
 
 log = logging.getLogger(__name__)
 
@@ -16,34 +16,21 @@ _CF_TYPE_MAP = {
 _CF_TYPE_DEFAULT = "NVARCHAR(MAX)"
 
 
-def get_conn(server: str, database: str, username: str, password: str) -> pyodbc.Connection:
-    drivers = [
-        "ODBC Driver 18 for SQL Server",
-        "ODBC Driver 17 for SQL Server",
-        "SQL Server",
-    ]
-    for driver in drivers:
-        try:
-            conn = pyodbc.connect(
-                f"DRIVER={{{driver}}};"
-                f"SERVER={server};"
-                f"DATABASE={database};"
-                f"UID={username};"
-                f"PWD={password};"
-                "TrustServerCertificate=yes;"
-                "Encrypt=yes;",
-                autocommit=False,
-            )
-            log.debug("Connected via '%s'", driver)
-            return conn
-        except pyodbc.Error:
-            continue
-    raise RuntimeError("No suitable ODBC driver found. Install 'ODBC Driver 17/18 for SQL Server'.")
+def get_conn(server: str, database: str, username: str, password: str) -> pymssql.Connection:
+    conn = pymssql.connect(
+        server=server,
+        user=username,
+        password=password,
+        database=database,
+        autocommit=False,
+    )
+    log.debug("Connected via pymssql")
+    return conn
 
 
-def merge_rows(conn: pyodbc.Connection, table: str, key_col: str, rows: list[dict]) -> int:
+def merge_rows(conn: pymssql.Connection, table: str, key_col: str, rows: list[dict]) -> int:
     """
-    MERGE rows into table using key_col as the match key.
+    Upsert rows into table using key_col as the match key.
     Inserts new rows, updates changed rows. Does not delete.
     Returns number of rows processed.
     """
@@ -52,88 +39,109 @@ def merge_rows(conn: pyodbc.Connection, table: str, key_col: str, rows: list[dic
 
     cols = list(rows[0].keys())
     non_key = [c for c in cols if c != key_col]
+    col_list     = ", ".join(f"[{c}]" for c in cols)
+    placeholders = ", ".join("%s" for _ in cols)
+    set_clause   = ", ".join(f"[{c}] = %s" for c in non_key)
 
-    col_list  = ", ".join(f"[{c}]" for c in cols)
-    src_list  = ", ".join(f"s.[{c}]" for c in cols)
-    val_place = ", ".join("?" for _ in cols)
-    set_clause = ", ".join(f"t.[{c}] = s.[{c}]" for c in non_key)
-
-    sql = f"""
-        MERGE [{table}] AS t
-        USING (VALUES ({val_place})) AS s ({col_list})
-        ON t.[{key_col}] = s.[{key_col}]
-        WHEN MATCHED THEN
-            UPDATE SET {set_clause}
-        WHEN NOT MATCHED THEN
-            INSERT ({col_list}) VALUES ({src_list});
-    """
+    update_sql = f"UPDATE [{table}] SET {set_clause} WHERE [{key_col}] = %s"
+    insert_sql = f"INSERT INTO [{table}] ({col_list}) VALUES ({placeholders})"
 
     cur = conn.cursor()
     for row in rows:
-        vals = [row[c] for c in cols]
-        cur.execute(sql, vals)
+        non_key_vals = [row[c] for c in non_key]
+        key_val      = row[key_col]
+        try:
+            cur.execute(update_sql, non_key_vals + [key_val])
+        except Exception as e:
+            log.error("UPDATE failed on %s=%s: %s", key_col, key_val, e)
+            log.error("Params: %s", list(zip(non_key, non_key_vals)) + [(key_col, key_val)])
+            raise
+        if cur.rowcount == 0:
+            try:
+                cur.execute(insert_sql, [row[c] for c in cols])
+            except Exception as e:
+                log.error("INSERT failed on %s=%s: %s", key_col, key_val, e)
+                log.error("Params: %s", list(zip(cols, [row[c] for c in cols])))
+                raise
     conn.commit()
     return len(rows)
 
 
-def get_last_synced_at(conn: pyodbc.Connection, entity: str) -> datetime | None:
+def get_last_synced_at(conn: pymssql.Connection, entity: str) -> datetime | None:
     """Returns the last successful sync watermark for the given entity, or None."""
     cur = conn.cursor()
     cur.execute(
-        "SELECT last_synced_at FROM sync_log WHERE entity = ? AND status = 'success'",
+        "SELECT last_synced_at FROM sync_log WHERE entity = %s AND status = 'success'",
         entity,
     )
     row = cur.fetchone()
+    cur.close()
     if row and row[0]:
-        val = row[0]
-        # pyodbc may return datetime or datetimeoffset string
-        if isinstance(val, datetime):
-            return val
-        return datetime.fromisoformat(str(val))
+        dt = row[0]
+        if isinstance(dt, datetime):
+            return dt
+        return datetime.fromisoformat(str(dt))
     return None
 
 
 def write_sync_log(
-    conn: pyodbc.Connection,
+    conn: pymssql.Connection,
     entity: str,
     status: str,
     rows: int,
     last_synced_at: datetime = None,
     error: str = None,
+    cursor_id: int = None,
 ) -> None:
     """Upsert a row in sync_log for the given entity."""
     cur = conn.cursor()
-    cur.execute(
-        """
-        MERGE sync_log AS t
-        USING (VALUES (?, ?, ?, ?, ?, ?)) AS s (entity, last_synced_at, last_run_at, rows_affected, status, error_message)
-        ON t.entity = s.entity
-        WHEN MATCHED THEN
-            UPDATE SET
-                last_synced_at = s.last_synced_at,
-                last_run_at    = s.last_run_at,
-                rows_affected  = s.rows_affected,
-                status         = s.status,
-                error_message  = s.error_message
-        WHEN NOT MATCHED THEN
-            INSERT (entity, last_synced_at, last_run_at, rows_affected, status, error_message)
-            VALUES (s.entity, s.last_synced_at, s.last_run_at, s.rows_affected, s.status, s.error_message);
-        """,
-        entity,
-        last_synced_at,
-        datetime.now(timezone.utc),
-        rows,
-        status,
-        error,
-    )
+    try:
+        cur.execute(
+            """
+            MERGE sync_log AS t
+            USING (VALUES (%s, %s, %s, %s, %s, %s, %s)) AS s (entity, last_synced_at, last_run_at, rows_affected, status, error_message, cursor_id)
+            ON t.entity = s.entity
+            WHEN MATCHED THEN
+                UPDATE SET
+                    last_synced_at = s.last_synced_at,
+                    last_run_at    = s.last_run_at,
+                    rows_affected  = s.rows_affected,
+                    status         = s.status,
+                    error_message  = s.error_message,
+                    cursor_id      = COALESCE(s.cursor_id, t.cursor_id)
+            WHEN NOT MATCHED THEN
+                INSERT (entity, last_synced_at, last_run_at, rows_affected, status, error_message, cursor_id)
+                VALUES (s.entity, s.last_synced_at, s.last_run_at, s.rows_affected, s.status, s.error_message, s.cursor_id);
+            """,
+            (entity, last_synced_at, datetime.now(timezone.utc), rows, status, error, cursor_id),
+        )
+        conn.commit()
+    finally:
+        cur.close()
+
+
+def get_backfill_cursor(conn: pymssql.Connection, entity: str) -> int | None:
+    """Return the last successfully processed parent ID for a backfill entity, or None."""
+    cur = conn.cursor()
+    cur.execute("SELECT cursor_id FROM sync_log WHERE entity = %s", entity)
+    row = cur.fetchone()
+    cur.close()
+    return row[0] if row and row[0] is not None else None
+
+
+def clear_backfill_cursor(conn: pymssql.Connection, entity: str) -> None:
+    """Explicitly set cursor_id to NULL for the given entity."""
+    cur = conn.cursor()
+    cur.execute("UPDATE sync_log SET cursor_id = NULL WHERE entity = %s", entity)
     conn.commit()
+    cur.close()
 
 
 def ensure_custom_field_column(
-    conn: pyodbc.Connection, field_name: str, field_type: str
+    conn: pymssql.Connection, field_name: str, field_type: str, table: str = "tickets"
 ) -> None:
     """
-    Add a cf_<field_name> column to the tickets table if it does not exist.
+    Add a cf_<field_name> column to the given table if it does not exist.
     field_type is the Freshservice field_type string (e.g. 'custom_text').
     """
     col_name = f"cf_{field_name}" if not field_name.startswith("cf_") else field_name
@@ -143,17 +151,17 @@ def ensure_custom_field_column(
     cur.execute(
         """
         SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_NAME = 'tickets' AND COLUMN_NAME = ?
+        WHERE TABLE_NAME = %s AND COLUMN_NAME = %s
         """,
-        col_name,
+        (table, col_name),
     )
     if cur.fetchone() is None:
-        log.info("Adding column [%s] %s to tickets table.", col_name, sql_type)
-        cur.execute(f"ALTER TABLE tickets ADD [{col_name}] {sql_type} NULL")
+        log.info("Adding column [%s] %s to %s table.", col_name, sql_type, table)
+        cur.execute(f"ALTER TABLE [{table}] ADD [{col_name}] {sql_type} NULL")
         conn.commit()
 
 
-def run_schema_file(conn: pyodbc.Connection, schema_path: str) -> None:
+def run_schema_file(conn: pymssql.Connection, schema_path: str) -> None:
     """Execute all statements in schema.sql against the connection."""
     with open(schema_path, encoding="utf-8") as f:
         lines = f.readlines()
@@ -168,6 +176,6 @@ def run_schema_file(conn: pyodbc.Connection, schema_path: str) -> None:
         try:
             cur.execute(stmt)
             conn.commit()
-        except pyodbc.Error as e:
+        except Exception as e:
             log.warning("Schema statement warning (may be harmless): %s", e)
     log.info("Schema setup complete.")
