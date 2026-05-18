@@ -101,9 +101,9 @@ def sync_agents(conn, client: FreshserviceClient) -> int:
 
 # ── requesters ────────────────────────────────────────────────────────────────
 
-def sync_requesters(conn, client: FreshserviceClient) -> int:
-    log.info("Syncing requesters...")
-    raw = client.get_requesters()
+def sync_requesters(conn, client: FreshserviceClient, active_only: bool = True) -> int:
+    log.info("Syncing requesters (active_only=%s)...", active_only)
+    raw = client.get_requesters(active_only=active_only)
     rows = []
     for r in raw:
         rows.append({

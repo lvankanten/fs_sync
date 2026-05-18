@@ -89,8 +89,11 @@ class FreshserviceClient:
     def get_agents(self) -> list:
         return self._paginate("agents", "agents")
 
-    def get_requesters(self) -> list:
-        return self._paginate("requesters", "requesters")
+    def get_requesters(self, active_only: bool = True) -> list:
+        """Paginate all requesters. Default active_only=True filters to active users
+        (~37% of total — saves significant API time)."""
+        params = {"active": "true"} if active_only else None
+        return self._paginate("requesters", "requesters", params)
 
     # ── groups ────────────────────────────────────────────────────────────────
 

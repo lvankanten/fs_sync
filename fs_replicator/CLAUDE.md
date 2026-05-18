@@ -50,6 +50,8 @@ python replicator.py --full                    # full load of all entities (no s
 python replicator.py                           # incremental run (changes since last sync)
 python replicator.py --test                    # smoke test: 300 newest tickets/problems/changes/releases
 python replicator.py --backfill-sub-entities   # fetch conversations/tasks/time entries for ALL records in DB
+python replicator.py --loop                    # run incremental continuously (default 5min sleep). Ctrl-C to stop.
+python replicator.py --loop --interval-seconds 60   # custom interval (e.g., 60s)
 
 python workload_sync.py                        # capture planned_effort/start_date/end_date for open tickets
 python workload_sync.py --older-than-hours 4   # only refresh rows not checked in N hours
@@ -205,7 +207,8 @@ Indexes on `tickets`: `updated_at`, `status`, `requester_id`, `responder_id`.
   - Warns if >500 tickets require individual GETs (estimates hours)
   - Custom field discovery via `get_ticket_fields()` runs at start of each ticket sync
 - `sync_conversations` — skipped on `--full`. Runs on incremental for tickets touched in that run.
-- `sync_agents` / `sync_requesters` — full reload every run (no `updated_since` filter; small datasets).
+- `sync_agents` — full reload every run (no `updated_since` filter; small dataset).
+- `sync_requesters` — every run with `active_only=True` by default (passes `?active=true` to API, ~37% of total). `--full` passes `active_only=False` to pull active + inactive. Inactive requesters already in the DB are never deleted (FK integrity with tickets).
 - `sync_agent_groups` / `sync_requester_groups` — full reload every run. Return `(groups, members)` tuple so the replicator writes separate `sync_log` entries for the parent table and `*_group_members` table.
 - `sync_departments` / `sync_locations` — full reload every run.
 - `sync_problems` / `sync_changes` / `sync_releases` — incremental via `updated_since`. Same detail-only field pattern as tickets.

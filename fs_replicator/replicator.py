@@ -11,6 +11,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -73,7 +74,13 @@ def main():
     parser.add_argument("--full",               action="store_true", help="Force full reload (ignore watermarks)")
     parser.add_argument("--test",               action="store_true", help="Smoke test: sync first 300 tickets/problems/changes/releases, write real watermarks")
     parser.add_argument("--backfill-sub-entities", action="store_true", help="Fetch conversations, tasks, and time entries for ALL tickets/problems/changes/releases in DB")
+    parser.add_argument("--loop",               action="store_true", help="Run incremental syncs continuously. Stop with Ctrl-C.")
+    parser.add_argument("--interval-seconds",   type=int, default=300, help="Seconds to sleep between iterations when --loop is set (default: 300)")
     args = parser.parse_args()
+
+    if args.loop and (args.full or args.test or args.setup or args.reset or args.truncate or args.backfill_sub_entities):
+        log.error("--loop can only be combined with incremental mode (no other flags).")
+        sys.exit(2)
 
     cfg = load_env()
 
@@ -251,11 +258,42 @@ def main():
             log.info("Backfill complete. Elapsed: %dh %dm %ds.", hours, minutes, seconds)
         return
 
+    # ── single-shot or loop ───────────────────────────────────────────────────
+    if args.loop:
+        log.info("Starting continuous incremental loop, interval=%ds. Press Ctrl-C to stop.", args.interval_seconds)
+        conn.close()  # we'll open a fresh one per iteration
+        iteration = 0
+        try:
+            while True:
+                iteration += 1
+                log.info("===== Iteration %d =====", iteration)
+                c = db.get_conn(cfg["server"], cfg["database"], cfg["username"], cfg["password"])
+                try:
+                    _run_sync_cycle(c, client, args, db, syncers)
+                finally:
+                    c.close()
+                log.info("Iteration %d complete. Sleeping %ds...", iteration, args.interval_seconds)
+                time.sleep(args.interval_seconds)
+        except KeyboardInterrupt:
+            log.info("Loop stopped by user after %d iteration(s).", iteration)
+            return
+
+    errors = _run_sync_cycle(conn, client, args, db, syncers)
+    conn.close()
+    if errors:
+        log.warning("Completed with errors in: %s", ", ".join(errors))
+        sys.exit(1)
+    else:
+        log.info("All entities synced successfully.")
+
+
+def _run_sync_cycle(conn, client, args, db, syncers):
+    """Run one full incremental (or --full) sync cycle. Returns list of error entity names."""
     # Sync order respects FK constraints: reference data before tickets/problems/changes/releases.
     # Reference entities have no updated_since filter — full reload every run (small datasets, ~30s overhead).
     ENTITIES = [
         ("agents",           lambda: syncers.sync_agents(conn, client)),
-        ("requesters",       lambda: syncers.sync_requesters(conn, client)),
+        ("requesters",       lambda: syncers.sync_requesters(conn, client, active_only=not args.full)),
         ("agent_groups",     lambda: syncers.sync_agent_groups(conn, client)),
         ("requester_groups", lambda: syncers.sync_requester_groups(conn, client)),
         ("departments",      lambda: syncers.sync_departments(conn, client)),
@@ -426,13 +464,11 @@ def main():
     else:
         log.info("No releases to sync sub-entities for.")
 
-    conn.close()
-
     if errors:
-        log.warning("Completed with errors in: %s", ", ".join(errors))
-        sys.exit(1)
+        log.warning("Cycle completed with errors in: %s", ", ".join(errors))
     else:
-        log.info("All entities synced successfully.")
+        log.info("Cycle complete: all entities synced successfully.")
+    return errors
 
 
 if __name__ == "__main__":
