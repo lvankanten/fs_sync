@@ -289,12 +289,10 @@ def _map_ticket(ticket: dict, detail: dict, cf_map: dict) -> dict:
 
     # Fields only returned by the individual ticket GET (not the list endpoint).
     # Exclude when no detail was fetched to avoid overwriting existing DB values with NULL.
+    # planned_* are owned by workload_sync.py and stored in the ticket_workload table.
     if has_detail:
         row["urgency"]            = t.get("urgency")
         row["impact"]             = t.get("impact")
-        row["planned_start_date"] = _parse_dt(t.get("planned_start_date"))
-        row["planned_end_date"]   = _parse_dt(t.get("planned_end_date"))
-        row["planned_effort"]     = t.get("planned_effort")
         row["resolution_notes"]   = t.get("resolution_notes")
 
     # Populate individual cf_ columns
@@ -387,67 +385,6 @@ def sync_tickets(
 
     log.info("Tickets: %d rows upserted.", total)
     return total, ticket_ids, run_start
-
-
-# ── workload field refresh ────────────────────────────────────────────────────
-
-_DETAIL_ONLY_COLS = ("urgency", "impact", "planned_effort", "planned_start_date", "planned_end_date")
-
-def refresh_detail_fields(conn, client: FreshserviceClient) -> int:
-    """Re-fetch detail-only fields for all open tickets and update where changed.
-
-    The ticket list endpoint does not return urgency, impact, or planned_* fields.
-    This function fetches individual GETs for open tickets and updates the DB
-    only where values differ.
-    """
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, urgency, impact, planned_effort, planned_start_date, planned_end_date "
-        "FROM tickets WHERE status NOT IN (4, 5) ORDER BY id"
-    )
-    db_rows = {row[0]: row[1:] for row in cur.fetchall()}
-    cur.close()
-
-    if not db_rows:
-        log.info("No open tickets to refresh detail fields for.")
-        return 0
-
-    log.info("Refreshing detail-only fields for %d open tickets...", len(db_rows))
-    updated = 0
-
-    for i, tid in enumerate(db_rows):
-        try:
-            t = client.get_ticket(tid)
-            time.sleep(1)
-        except Exception as e:
-            log.warning("  Could not fetch ticket %d for detail refresh: %s", tid, e)
-            continue
-
-        api_vals = (
-            t.get("urgency"),
-            t.get("impact"),
-            t.get("planned_effort"),
-            _parse_dt(t.get("planned_start_date")),
-            _parse_dt(t.get("planned_end_date")),
-        )
-
-        if api_vals != db_rows[tid]:
-            cur = conn.cursor()
-            cur.execute(
-                "UPDATE tickets SET urgency = %s, impact = %s, planned_effort = %s, "
-                "planned_start_date = %s, planned_end_date = %s WHERE id = %s",
-                (*api_vals, tid),
-            )
-            conn.commit()
-            cur.close()
-            updated += 1
-            log.info("  Ticket %d: detail fields updated.", tid)
-
-        if (i + 1) % 100 == 0:
-            log.info("  Processed %d / %d open tickets...", i + 1, len(db_rows))
-
-    log.info("Detail field refresh complete: %d ticket(s) updated.", updated)
-    return updated
 
 
 # ── conversations ─────────────────────────────────────────────────────────────

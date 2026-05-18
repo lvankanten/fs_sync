@@ -300,18 +300,6 @@ def main():
         ticket_ids = []
         run_start = None
 
-    # ── detail-only field refresh (incremental only) ────────────────────────────
-    # The list endpoint omits urgency, impact, and planned_* fields.
-    # Re-fetch open tickets individually and update where values differ.
-    if not (args.full or args.test):
-        try:
-            updated = syncers.refresh_detail_fields(conn, client)
-            db.write_sync_log(conn, "detail_refresh", "success", updated)
-        except Exception as e:
-            log.error("Detail field refresh failed: %s", e)
-            db.write_sync_log(conn, "detail_refresh", "error", 0, error=str(e))
-            errors.append("detail_refresh")
-
     # ── ticket sub-entities ───────────────────────────────────────────────────
     if args.full:
         log.info("Skipping ticket sub-entities on full load (will sync on incremental runs).")

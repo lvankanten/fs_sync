@@ -148,9 +148,6 @@ CREATE TABLE tickets (
     fr_due_by           DATETIMEOFFSET(0)   NULL,
     resolved_at         DATETIMEOFFSET(0)   NULL,
     closed_at           DATETIMEOFFSET(0)   NULL,
-    planned_start_date  DATETIMEOFFSET(0)   NULL,
-    planned_end_date    DATETIMEOFFSET(0)   NULL,
-    planned_effort      NVARCHAR(50)        NULL,
     resolution_notes    NVARCHAR(MAX)       NULL,
     custom_fields_json  NVARCHAR(MAX)       NULL,
     replicated_at       DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
@@ -187,9 +184,6 @@ CREATE TABLE conversations (
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_conversations_ticket_id' AND object_id = OBJECT_ID('conversations'))
     CREATE INDEX IX_conversations_ticket_id ON conversations (ticket_id);
-
-IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tickets' AND COLUMN_NAME = 'planned_effort')
-    ALTER TABLE tickets ADD planned_effort NVARCHAR(50) NULL;
 
 IF OBJECT_ID('ticket_tasks', 'U') IS NULL
 CREATE TABLE ticket_tasks (
@@ -551,6 +545,20 @@ IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'requ
 
 IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'agent_groups' AND COLUMN_NAME = 'auto_ticket_assign')
     ALTER TABLE agent_groups ADD auto_ticket_assign BIT NULL, restricted BIT NULL, workspace_id BIGINT NULL, business_hours_id BIGINT NULL, approval_required BIT NULL, ocs_schedule_id BIGINT NULL
+
+IF OBJECT_ID('ticket_workload', 'U') IS NULL
+CREATE TABLE ticket_workload (
+    ticket_id           BIGINT              NOT NULL,
+    planned_effort      NVARCHAR(50)        NULL,
+    planned_start_date  DATETIMEOFFSET(0)   NULL,
+    planned_end_date    DATETIMEOFFSET(0)   NULL,
+    last_checked_at     DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    CONSTRAINT PK_ticket_workload PRIMARY KEY (ticket_id),
+    CONSTRAINT FK_ticket_workload_tickets FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+);
+
+IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tickets' AND COLUMN_NAME = 'planned_effort')
+    ALTER TABLE tickets DROP COLUMN planned_effort, planned_start_date, planned_end_date
 
 IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'agents' AND COLUMN_NAME = 'has_logged_in')
     ALTER TABLE agents ADD

@@ -20,6 +20,8 @@ fs_replicator/
   replicator.py         # entry point — tickets, conversations, tasks, time entries,
                         #   agents, requesters, groups, departments, locations,
                         #   problems, changes, releases
+  workload_sync.py      # separate process — captures planned_effort/start/end_date
+                        #   into ticket_workload table on its own schedule
   projects_replicator.py  # projects, project tasks, milestones, members, time entries
   assets_replicator.py    # assets, asset relationships, components
   catalog_replicator.py   # service catalog categories and items
@@ -48,6 +50,9 @@ python replicator.py --full                    # full load of all entities (no s
 python replicator.py                           # incremental run (changes since last sync)
 python replicator.py --test                    # smoke test: 300 newest tickets/problems/changes/releases
 python replicator.py --backfill-sub-entities   # fetch conversations/tasks/time entries for ALL records in DB
+
+python workload_sync.py                        # capture planned_effort/start_date/end_date for open tickets
+python workload_sync.py --older-than-hours 4   # only refresh rows not checked in N hours
 ```
 
 ### Common workflows
@@ -57,7 +62,7 @@ python replicator.py --backfill-sub-entities   # fetch conversations/tasks/time 
 python replicator.py --setup                   # create schema
 python replicator.py --full                    # load all main entities
 python replicator.py --backfill-sub-entities   # load all conversations/tasks/time entries (run overnight)
-python replicator.py                           # incremental — fills in detail-only fields for open tickets
+python replicator.py                           # incremental — picks up urgency/impact/etc. via per-ticket GET for open tickets
 ```
 
 **Restore simulation / migrate to new database instance:**
@@ -65,7 +70,7 @@ python replicator.py                           # incremental — fills in detail
 python replicator.py --truncate                # clear all data, keep schema
 python replicator.py --full
 python replicator.py --backfill-sub-entities
-python replicator.py                           # incremental — fills in detail-only fields
+python replicator.py                           # incremental — picks up urgency/impact/etc. via per-ticket GET
 ```
 
 **Schema change (new columns or tables):**
@@ -73,7 +78,7 @@ python replicator.py                           # incremental — fills in detail
 python replicator.py --reset                   # drop and recreate all tables
 python replicator.py --full
 python replicator.py --backfill-sub-entities
-python replicator.py                           # incremental — fills in detail-only fields
+python replicator.py                           # incremental — picks up urgency/impact/etc. via per-ticket GET
 ```
 
 **Ongoing scheduled runs:**
@@ -126,6 +131,7 @@ All ID and foreign key columns use `BIGINT` — Freshservice IDs exceed SQL Serv
 | `release_conversations` | `id BIGINT` | FK → `releases(id)`. DELETE+re-INSERT per release. |
 | `release_tasks` | `id BIGINT` | FK → `releases(id)`. Includes `planned_start_date`, `planned_end_date`, `planned_effort`. |
 | `release_time_entries` | `id BIGINT` | FK → `releases(id)`. |
+| `ticket_workload` | `ticket_id BIGINT` | FK → `tickets(id)`. Populated by `workload_sync.py`, NOT `replicator.py`. Tracks `planned_effort`, `planned_start_date`, `planned_end_date`, `last_checked_at`. Separate cadence because these fields don't bump ticket `updated_at` and so are invisible to the main replicator's incremental sync. |
 
 Indexes on `tickets`: `updated_at`, `status`, `requester_id`, `responder_id`.
 
@@ -198,7 +204,6 @@ Indexes on `tickets`: `updated_at`, `status`, `requester_id`, `responder_id`.
   - `limit=300` + `max_pages=1` on `--test`: fetches only first page, writes real watermark
   - Warns if >500 tickets require individual GETs (estimates hours)
   - Custom field discovery via `get_ticket_fields()` runs at start of each ticket sync
-- `refresh_detail_fields(conn, client)` — re-fetches individual GETs for all open tickets (status not Closed/Resolved), compares detail-only fields (urgency, impact, planned_effort, planned_start_date, planned_end_date) against DB values, and updates only where different. Runs on every incremental. ~250 tickets at 1s/ticket ≈ 4 minutes.
 - `sync_conversations` — skipped on `--full`. Runs on incremental for tickets touched in that run.
 - `sync_agents` / `sync_requesters` — full reload every run (no `updated_since` filter; small datasets).
 - `sync_agent_groups` / `sync_requester_groups` — full reload every run. Return `(groups, members)` tuple so the replicator writes separate `sync_log` entries for the parent table and `*_group_members` table.
@@ -209,7 +214,7 @@ Indexes on `tickets`: `updated_at`, `status`, `requester_id`, `responder_id`.
 ### `replicator.py`
 Sync order respects FK constraints:
 - `--full` / `--test`: agents → requesters → groups → departments → locations → tickets → problems → changes → releases (+ sub-entities)
-- Incremental: agents → requesters → groups → departments → locations → tickets → detail refresh (open tickets) → conversations/tasks/time entries → problems → changes → releases (+ sub-entities). Reference entities are full-reloaded every run (small datasets, ~30s overhead).
+- Incremental: agents → requesters → groups → departments → locations → tickets → conversations/tasks/time entries → problems → changes → releases (+ sub-entities). Reference entities are full-reloaded every run (small datasets, ~30s overhead). Workload fields (planned_*) handled separately by `workload_sync.py`.
 
 Each entity: read watermark → sync → write sync_log. Failure logs an error and continues; watermark is NOT advanced on failure so the next run retries from the same point.
 
@@ -226,7 +231,7 @@ Each entity: read watermark → sync → write sync_log. Failure logs an error a
 | `GET /api/v2/ticket_fields` | Returns 404 on this plan. Use `ticket_form_fields` instead. |
 | `GET /api/v2/tickets?include=description` | Returns 400 — not supported. |
 | `GET /api/v2/tickets` (list endpoint) | Does NOT return `urgency`, `impact`, `planned_effort`, `planned_start_date`, `planned_end_date`, `resolution_notes`. These require individual ticket GETs. |
-| Workload Management fields (`planned_effort`, `planned_start_date`, `planned_end_date`) | Updating these fields does **not** bump `updated_at` on the ticket. This means the `updated_since` filter will not pick up changes to these fields unless another field on the ticket also changes. The `refresh_detail_fields` step on incremental runs compensates for this by re-checking all open tickets. |
+| Workload Management fields (`planned_effort`, `planned_start_date`, `planned_end_date`) | Updating these fields does **not** bump `updated_at` on the ticket. This means the `updated_since` filter will not pick up changes to these fields unless another field on the ticket also changes. **Captured by `workload_sync.py` (separate script)** writing to the `ticket_workload` table — runs on its own schedule, not part of `replicator.py`. |
 | Problem conversations (`/problems/{id}/conversations`) | Returns 404 on this plan. Detected on first call and skipped. |
 | Conversations / Tasks / Time Entries | No `updated_since` filter. Re-fetched per parent record on every incremental run. |
 | Agents / Requesters / Groups / Departments / Locations | No `updated_since` filter. Full reload on `--full` only. |
@@ -251,13 +256,13 @@ Freshservice IDs exceed SQL Server INT max (~2.1B). All PK and FK columns use BI
 `run_schema_file` strips `--` comment lines before splitting on blank lines. pyodbc/pymssql cannot execute multi-statement batches; each statement must be executed individually.
 
 ### Full load strategy
-37k+ tickets × 1s per individual GET = ~10 hours. `--full` uses `fetch_details=False` to skip individual GETs. Detail-only fields (`urgency`, `impact`, `planned_*`, `resolution_notes`) are excluded from the row so existing DB values are preserved. These fields fill in via the `refresh_detail_fields` step on incremental runs.
+37k+ tickets × 1s per individual GET = ~10 hours. `--full` uses `fetch_details=False` to skip individual GETs. Detail-only fields (`urgency`, `impact`, `planned_*`, `resolution_notes`) are excluded from the row so existing DB values are preserved. urgency/impact/resolution_notes fill in via normal incremental GETs (they bump `updated_at`). planned_* fields are handled by `workload_sync.py` (separate process).
 
 ### Detail-only fields (list vs individual GET)
 The ticket list endpoint (`GET /tickets`) does not return: `urgency`, `impact`, `planned_effort`, `planned_start_date`, `planned_end_date`, `resolution_notes`. The individual ticket GET (`GET /tickets/{id}`) does return them. When `fetch_details=False`, these fields are excluded from `_map_ticket` output so `merge_rows` does not overwrite existing DB values with NULL. The `refresh_detail_fields` function on incremental runs re-fetches all open tickets individually and updates only where values differ (~4 min for ~250 open tickets).
 
 ### Workload Management fields don't update `updated_at`
-Changing `planned_effort`, `planned_start_date`, or `planned_end_date` (via API or UI) does NOT change the ticket's `updated_at` timestamp. Standard fields (priority, status, category, custom fields, etc.) DO update `updated_at`. This was verified by controlled testing. The `refresh_detail_fields` step compensates by re-checking all open tickets on every incremental run regardless of watermark.
+Changing `planned_effort`, `planned_start_date`, or `planned_end_date` (via API or UI) does NOT change the ticket's `updated_at` timestamp. Standard fields (priority, status, category, custom fields, etc.) DO update `updated_at`. This was verified by controlled testing. Handled by `workload_sync.py` running on its own schedule (not part of `replicator.py`).
 
 ### `--test` mode
 Fetches 300 newest tickets/problems/changes/releases (1 API page each), writes a real watermark. Then run incremental to validate the full pipeline end-to-end without processing all records.
@@ -274,7 +279,7 @@ SQL Server does not allow `TRUNCATE TABLE` on a table referenced by FK constrain
 
 Freshservice enforces API rate limits. When hit (HTTP 429), the code reads `Retry-After` and sleeps automatically. Mitigations:
 - 0.5s sleep between pagination pages
-- 1s sleep between individual ticket GETs (incremental and detail refresh)
+- 1s sleep between individual ticket GETs (incremental sync_tickets and workload_sync.py)
 - Full load skips individual GETs entirely
 
 ---
@@ -284,7 +289,7 @@ Freshservice enforces API rate limits. When hit (HTTP 429), the code reads `Retr
 | Entity | Strategy |
 |---|---|
 | Tickets | `updated_since` watermark — only changed tickets fetched via list endpoint |
-| Detail-only fields | `refresh_detail_fields` — individual GETs for all open tickets, compare and update where different |
+| Workload fields (planned_*) | Captured by `workload_sync.py` into `ticket_workload` table — separate process, own schedule |
 | Conversations / Tasks / Time Entries | Re-fetched for tickets that appeared in the ticket sync window |
 | Problems / Changes / Releases | `updated_since` watermark — same pattern as tickets |
 | Agents / Requesters / Groups / Departments / Locations | Full reload every run (no `updated_since` filter, small datasets, ~30s overhead). Adds separate `sync_log` entries for `agent_group_members` and `requester_group_members`. |
