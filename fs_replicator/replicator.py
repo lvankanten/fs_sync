@@ -2,7 +2,8 @@
 Freshservice → SQL Server replicator
 
 Usage:
-  python replicator.py           # incremental run (changes since last sync)
+  python replicator.py           # loop incremental continuously (Ctrl-C to stop)
+  python replicator.py --once    # single incremental run, then exit
   python replicator.py --full    # force full reload of all entities
   python replicator.py --setup   # create tables in FS database, then exit
 """
@@ -74,13 +75,9 @@ def main():
     parser.add_argument("--full",               action="store_true", help="Force full reload (ignore watermarks)")
     parser.add_argument("--test",               action="store_true", help="Smoke test: sync first 300 tickets/problems/changes/releases, write real watermarks")
     parser.add_argument("--backfill-sub-entities", action="store_true", help="Fetch conversations, tasks, and time entries for ALL tickets/problems/changes/releases in DB")
-    parser.add_argument("--loop",               action="store_true", help="Run incremental syncs continuously. Stop with Ctrl-C.")
-    parser.add_argument("--interval-seconds",   type=int, default=300, help="Seconds to sleep between iterations when --loop is set (default: 300)")
+    parser.add_argument("--once",               action="store_true", help="Run a single incremental and exit (default is to loop continuously)")
+    parser.add_argument("--interval-seconds",   type=int, default=300, help="Seconds to sleep between iterations when looping (default: 300)")
     args = parser.parse_args()
-
-    if args.loop and (args.full or args.test or args.setup or args.reset or args.truncate or args.backfill_sub_entities):
-        log.error("--loop can only be combined with incremental mode (no other flags).")
-        sys.exit(2)
 
     cfg = load_env()
 
@@ -96,6 +93,7 @@ def main():
         if args.reset:
             log.info("Dropping all tables...")
             drop_order = [
+                "project_tasks", "project_members", "projects",
                 "release_time_entries", "release_tasks", "release_conversations", "releases",
                 "change_time_entries", "change_tasks", "change_conversations", "changes",
                 "problem_time_entries", "problem_tasks", "problem_conversations", "problems",
@@ -124,7 +122,8 @@ def main():
             "problem_conversations", "problem_tasks", "problem_time_entries",
             "change_conversations", "change_tasks", "change_time_entries",
             "release_conversations", "release_tasks", "release_time_entries",
-            "tickets", "problems", "changes", "releases",
+            "project_tasks", "project_members",
+            "tickets", "problems", "changes", "releases", "projects",
             "agent_group_members", "agent_groups",
             "requester_group_members", "requester_groups",
             "agents", "requesters", "departments", "locations", "sync_log",
@@ -259,7 +258,9 @@ def main():
         return
 
     # ── single-shot or loop ───────────────────────────────────────────────────
-    if args.loop:
+    # Loop is the default. --once, --full, and --test all run a single cycle.
+    should_loop = not (args.once or args.full or args.test)
+    if should_loop:
         log.info("Starting continuous incremental loop, interval=%ds. Press Ctrl-C to stop.", args.interval_seconds)
         conn.close()  # we'll open a fresh one per iteration
         iteration = 0
@@ -463,6 +464,33 @@ def _run_sync_cycle(conn, client, args, db, syncers):
                 errors.append(entity)
     else:
         log.info("No releases to sync sub-entities for.")
+
+    # ── projects (NewGen) ────────────────────────────────────────────────────
+    # Small dataset (~50 at JES) — full re-sync each run, no updated_since filter on this endpoint.
+    project_run_start = datetime.now(timezone.utc)
+    try:
+        rows, project_ids = syncers.sync_projects(conn, client)
+        db.write_sync_log(conn, "projects", "success", rows, last_synced_at=project_run_start)
+    except Exception as e:
+        log.error("projects sync failed: %s", e)
+        db.write_sync_log(conn, "projects", "error", 0, error=str(e))
+        errors.append("projects")
+        project_ids = []
+
+    if project_ids:
+        for entity, fn in [
+            ("project_tasks",   lambda: syncers.sync_project_tasks(conn, client, project_ids)),
+            ("project_members", lambda: syncers.sync_project_members(conn, client, project_ids)),
+        ]:
+            try:
+                rows = fn()
+                db.write_sync_log(conn, entity, "success", rows, last_synced_at=project_run_start)
+            except Exception as e:
+                log.error("%s sync failed: %s", entity, e)
+                db.write_sync_log(conn, entity, "error", 0, error=str(e))
+                errors.append(entity)
+    else:
+        log.info("No projects to sync sub-entities for.")
 
     if errors:
         log.warning("Cycle completed with errors in: %s", ", ".join(errors))

@@ -581,3 +581,92 @@ IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'agen
         workspace_ids_json NVARCHAR(MAX) NULL,
         department_ids_json NVARCHAR(MAX) NULL,
         workload_configs_json NVARCHAR(MAX) NULL
+
+-- ─── NewGen Projects (pm/ namespace) ──────────────────────────────────────────
+-- API: GET /api/v2/pm/projects, /api/v2/pm/projects/{id}/tasks, /api/v2/pm/projects/{id}/memberships
+-- Project status_id values (per UI): 1=Yet to start, 2=In progress, 3=Completed (+ On hold/Cancelled)
+-- Project priority_id values (per UI): 1=High, 2=Medium, 3=Low
+-- Task status_id is a separate per-template-defined enum (large IDs like 1000143449); no metadata endpoint, store the ID as-is.
+
+IF OBJECT_ID('projects', 'U') IS NULL
+CREATE TABLE projects (
+    id                  BIGINT              NOT NULL,
+    name                NVARCHAR(500)       NULL,
+    [key]               NVARCHAR(50)        NULL,
+    description         NVARCHAR(MAX)       NULL,
+    status_id           BIGINT              NULL,
+    priority_id         BIGINT              NULL,
+    sprint_duration     INT                 NULL,
+    project_type        SMALLINT            NULL,
+    start_date          DATE                NULL,
+    end_date            DATE                NULL,
+    archived            BIT                 NULL,
+    visibility          SMALLINT            NULL,
+    manager_id          BIGINT              NULL,
+    custom_fields_json  NVARCHAR(MAX)       NULL,
+    created_at          DATETIMEOFFSET(0)   NULL,
+    updated_at          DATETIMEOFFSET(0)   NULL,
+    replicated_at       DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    CONSTRAINT PK_projects PRIMARY KEY (id)
+);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_projects_updated_at' AND object_id = OBJECT_ID('projects'))
+    CREATE INDEX IX_projects_updated_at ON projects (updated_at);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_projects_manager_id' AND object_id = OBJECT_ID('projects'))
+    CREATE INDEX IX_projects_manager_id ON projects (manager_id);
+
+IF OBJECT_ID('project_tasks', 'U') IS NULL
+CREATE TABLE project_tasks (
+    id                  BIGINT              NOT NULL,
+    project_id          BIGINT              NOT NULL,
+    title               NVARCHAR(500)       NULL,
+    description         NVARCHAR(MAX)       NULL,
+    status_id           BIGINT              NULL,
+    priority_id         BIGINT              NULL,
+    type_id             BIGINT              NULL,
+    display_key         NVARCHAR(100)       NULL,
+    reporter_id         BIGINT              NULL,
+    assignee_id         BIGINT              NULL,
+    planned_start_date  DATETIMEOFFSET(0)   NULL,
+    planned_end_date    DATETIMEOFFSET(0)   NULL,
+    planned_effort      NVARCHAR(50)        NULL,
+    planned_duration    NVARCHAR(50)        NULL,
+    version_id          BIGINT              NULL,
+    parent_id           BIGINT              NULL,
+    story_points        INT                 NULL,
+    sprint_id           BIGINT              NULL,
+    custom_fields_json  NVARCHAR(MAX)       NULL,
+    created_at          DATETIMEOFFSET(0)   NULL,
+    updated_at          DATETIMEOFFSET(0)   NULL,
+    replicated_at       DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    CONSTRAINT PK_project_tasks PRIMARY KEY (id),
+    CONSTRAINT FK_project_tasks_projects FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_project_tasks_project_id' AND object_id = OBJECT_ID('project_tasks'))
+    CREATE INDEX IX_project_tasks_project_id ON project_tasks (project_id);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_project_tasks_assignee_id' AND object_id = OBJECT_ID('project_tasks'))
+    CREATE INDEX IX_project_tasks_assignee_id ON project_tasks (assignee_id);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_project_tasks_updated_at' AND object_id = OBJECT_ID('project_tasks'))
+    CREATE INDEX IX_project_tasks_updated_at ON project_tasks (updated_at);
+
+IF OBJECT_ID('project_members', 'U') IS NULL
+CREATE TABLE project_members (
+    id                  BIGINT              NOT NULL,
+    project_id          BIGINT              NOT NULL,
+    user_id             BIGINT              NULL,
+    access_type         SMALLINT            NULL,
+    manage_settings     BIT                 NULL,
+    project_manager     BIT                 NULL,
+    created_at          DATETIMEOFFSET(0)   NULL,
+    updated_at          DATETIMEOFFSET(0)   NULL,
+    replicated_at       DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    CONSTRAINT PK_project_members PRIMARY KEY (id),
+    CONSTRAINT FK_project_members_projects FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_project_members_project_id' AND object_id = OBJECT_ID('project_members'))
+    CREATE INDEX IX_project_members_project_id ON project_members (project_id);

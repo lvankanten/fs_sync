@@ -194,3 +194,22 @@ class FreshserviceClient:
 
     def get_release_time_entries(self, release_id: int) -> list:
         return self._paginate(f"releases/{release_id}/time_entries", "time_entries")
+
+    # ── projects (NewGen, pm/ namespace) ──────────────────────────────────────
+    # API path: /api/v2/pm/projects (NOT /api/v2/projects which returns 403)
+    # Status/priority enum IDs are project-scoped; no metadata endpoint exposed.
+
+    def get_projects(self, include_archived: bool = False) -> list:
+        """Paginate all NewGen projects. JES has ~50 projects total — small dataset, full re-sync per run."""
+        params = {}
+        if include_archived:
+            params["archived"] = "true"
+        return self._paginate("pm/projects", "projects", params)
+
+    def get_project_tasks(self, project_id: int) -> list:
+        """Return all tasks for a project. Tasks have their own status_id enum (large IDs, per template)."""
+        return self._paginate(f"pm/projects/{project_id}/tasks", "tasks")
+
+    def get_project_memberships(self, project_id: int) -> list:
+        """Return all memberships for a project (users + access_type + manage_settings + project_manager flags)."""
+        return self._paginate(f"pm/projects/{project_id}/memberships", "memberships")

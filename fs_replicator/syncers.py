@@ -1055,3 +1055,162 @@ def sync_release_tasks(conn, client: FreshserviceClient, release_ids: list[int])
 
 def sync_release_time_entries(conn, client: FreshserviceClient, release_ids: list[int]) -> int:
     return _sync_time_entries_for(conn, release_ids, client.get_release_time_entries, "release_time_entries", "release_id")
+
+
+# ── projects (NewGen, pm/ namespace) ──────────────────────────────────────────
+
+def _parse_date_only(val) -> datetime | None:
+    """Parse YYYY-MM-DD date string into a date-only datetime, or pass through datetime."""
+    if not val:
+        return None
+    if isinstance(val, datetime):
+        return val.date() if hasattr(val, "date") else val
+    try:
+        # FS returns "2026-03-24" for start_date/end_date (date-only, no time)
+        return datetime.fromisoformat(str(val)).date()
+    except (ValueError, AttributeError):
+        return None
+
+
+def sync_projects(conn, client: FreshserviceClient) -> tuple[int, list[int]]:
+    """
+    Full re-sync of NewGen projects. Small dataset (~tens at JES) so no incremental needed.
+    Returns (row_count, project_ids) — IDs feed sub-entity syncs.
+
+    The default GET /api/v2/pm/projects returns all non-archived projects (Completed included).
+    Archived projects are not exposed via this endpoint at JES (the archived=true param doesn't
+    filter — empirically returns same set). The `archived` BIT column on rows reflects the value
+    FS returned per-project, so SQL queries can still filter.
+    """
+    log.info("Syncing NewGen projects...")
+    raw = client.get_projects()
+    log.info("  %d projects total", len(raw))
+
+    rows = []
+    project_ids = []
+    for p in raw:
+        pid = p.get("id")
+        project_ids.append(pid)
+        rows.append({
+            "id":                  pid,
+            "name":                p.get("name"),
+            "key":                 p.get("key"),
+            "description":         p.get("description"),
+            "status_id":           p.get("status_id"),
+            "priority_id":         p.get("priority_id"),
+            "sprint_duration":     p.get("sprint_duration"),
+            "project_type":        p.get("project_type"),
+            "start_date":          _parse_date_only(p.get("start_date")),
+            "end_date":            _parse_date_only(p.get("end_date")),
+            "archived":            _bool_or_none(p.get("archived")),
+            "visibility":          p.get("visibility"),
+            "manager_id":          p.get("manager_id"),
+            "custom_fields_json":  _json_or_none(p.get("custom_fields")),
+            "created_at":          _parse_dt(p.get("created_at")),
+            "updated_at":          _parse_dt(p.get("updated_at")),
+        })
+
+    total = 0
+    for i in range(0, len(rows), _BATCH):
+        total += db.merge_rows(conn, "projects", "id", rows[i:i + _BATCH])
+    log.info("Projects: %d rows upserted.", total)
+    return total, project_ids
+
+
+def sync_project_tasks(conn, client: FreshserviceClient, project_ids: list[int]) -> int:
+    """Re-fetch and replace project tasks for all given project IDs."""
+    if not project_ids:
+        return 0
+
+    log.info("Syncing project tasks for %d projects...", len(project_ids))
+    cur = conn.cursor()
+    total = 0
+
+    for pid in project_ids:
+        try:
+            tasks = client.get_project_tasks(pid)
+        except Exception as e:
+            log.warning("  Could not fetch tasks for project %d: %s", pid, e)
+            continue
+
+        cur.execute("DELETE FROM project_tasks WHERE project_id = %s", pid)
+        conn.commit()
+
+        if not tasks:
+            continue
+
+        rows = []
+        for t in tasks:
+            rows.append({
+                "id":                  t.get("id"),
+                "project_id":          pid,
+                "title":               t.get("title"),
+                "description":         t.get("description"),
+                "status_id":           t.get("status_id"),
+                "priority_id":         t.get("priority_id"),
+                "type_id":             t.get("type_id"),
+                "display_key":         t.get("display_key"),
+                "reporter_id":         t.get("reporter_id"),
+                "assignee_id":         t.get("assignee_id"),
+                "planned_start_date":  _parse_dt(t.get("planned_start_date")),
+                "planned_end_date":    _parse_dt(t.get("planned_end_date")),
+                "planned_effort":      str(t.get("planned_effort")) if t.get("planned_effort") is not None else None,
+                "planned_duration":    str(t.get("planned_duration")) if t.get("planned_duration") is not None else None,
+                "version_id":          t.get("version_id"),
+                "parent_id":           t.get("parent_id"),
+                "story_points":        t.get("story_points"),
+                "sprint_id":           t.get("sprint_id"),
+                "custom_fields_json":  _json_or_none(t.get("custom_fields")),
+                "created_at":          _parse_dt(t.get("created_at")),
+                "updated_at":          _parse_dt(t.get("updated_at")),
+            })
+
+        for i in range(0, len(rows), _BATCH):
+            total += db.merge_rows(conn, "project_tasks", "id", rows[i:i + _BATCH])
+        time.sleep(0.1)  # gentle rate-limit cushion
+
+    log.info("Project tasks: %d rows upserted.", total)
+    return total
+
+
+def sync_project_members(conn, client: FreshserviceClient, project_ids: list[int]) -> int:
+    """Re-fetch and replace project memberships for all given project IDs."""
+    if not project_ids:
+        return 0
+
+    log.info("Syncing project memberships for %d projects...", len(project_ids))
+    cur = conn.cursor()
+    total = 0
+
+    for pid in project_ids:
+        try:
+            members = client.get_project_memberships(pid)
+        except Exception as e:
+            log.warning("  Could not fetch memberships for project %d: %s", pid, e)
+            continue
+
+        cur.execute("DELETE FROM project_members WHERE project_id = %s", pid)
+        conn.commit()
+
+        if not members:
+            continue
+
+        rows = []
+        for m in members:
+            rows.append({
+                "id":               m.get("id"),
+                "project_id":       pid,
+                "user_id":          m.get("user_id"),
+                "access_type":      m.get("access_type"),
+                "manage_settings":  _bool_or_none(m.get("manage_settings")),
+                "project_manager":  _bool_or_none(m.get("project_manager")),
+                "created_at":       _parse_dt(m.get("created_at")),
+                "updated_at":       _parse_dt(m.get("updated_at")),
+            })
+
+        for i in range(0, len(rows), _BATCH):
+            total += db.merge_rows(conn, "project_members", "id", rows[i:i + _BATCH])
+        time.sleep(0.1)
+
+    log.info("Project members: %d rows upserted.", total)
+    return total

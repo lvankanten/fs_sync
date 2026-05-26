@@ -47,11 +47,11 @@ python replicator.py --setup                   # create tables in FS database
 python replicator.py --reset                   # drop all tables and recreate (use when schema changes)
 python replicator.py --truncate                # clear all data, keep schema (restore simulation / DB migration)
 python replicator.py --full                    # full load of all entities (no sub-entities)
-python replicator.py                           # incremental run (changes since last sync)
+python replicator.py                           # run incremental continuously (loops, default 5min sleep). Ctrl-C to stop.
+python replicator.py --once                    # single incremental run (changes since last sync), then exit
+python replicator.py --interval-seconds 60     # loop with custom interval (e.g., 60s)
 python replicator.py --test                    # smoke test: 300 newest tickets/problems/changes/releases
 python replicator.py --backfill-sub-entities   # fetch conversations/tasks/time entries for ALL records in DB
-python replicator.py --loop                    # run incremental continuously (default 5min sleep). Ctrl-C to stop.
-python replicator.py --loop --interval-seconds 60   # custom interval (e.g., 60s)
 
 python workload_sync.py                        # capture planned_effort/start_date/end_date for open tickets
 python workload_sync.py --older-than-hours 4   # only refresh rows not checked in N hours
@@ -64,7 +64,7 @@ python workload_sync.py --older-than-hours 4   # only refresh rows not checked i
 python replicator.py --setup                   # create schema
 python replicator.py --full                    # load all main entities
 python replicator.py --backfill-sub-entities   # load all conversations/tasks/time entries (run overnight)
-python replicator.py                           # incremental — picks up urgency/impact/etc. via per-ticket GET for open tickets
+python replicator.py --once                    # incremental — picks up urgency/impact/etc. via per-ticket GET for open tickets
 ```
 
 **Restore simulation / migrate to new database instance:**
@@ -72,7 +72,7 @@ python replicator.py                           # incremental — picks up urgenc
 python replicator.py --truncate                # clear all data, keep schema
 python replicator.py --full
 python replicator.py --backfill-sub-entities
-python replicator.py                           # incremental — picks up urgency/impact/etc. via per-ticket GET
+python replicator.py --once                    # incremental — picks up urgency/impact/etc. via per-ticket GET
 ```
 
 **Schema change (new columns or tables):**
@@ -80,12 +80,13 @@ python replicator.py                           # incremental — picks up urgenc
 python replicator.py --reset                   # drop and recreate all tables
 python replicator.py --full
 python replicator.py --backfill-sub-entities
-python replicator.py                           # incremental — picks up urgency/impact/etc. via per-ticket GET
+python replicator.py --once                    # incremental — picks up urgency/impact/etc. via per-ticket GET
 ```
 
 **Ongoing scheduled runs:**
 ```bash
-python replicator.py                           # incremental — run daily or on a schedule
+python replicator.py --once                    # single incremental — for cron / Task Scheduler
+python replicator.py                           # OR run continuously as a long-lived process (loops, Ctrl-C to stop)
 ```
 
 ### `.env` (place in `fs_replicator/` directory)
