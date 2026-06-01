@@ -135,19 +135,16 @@ All ID and foreign key columns use `BIGINT` — Freshservice IDs exceed SQL Serv
 | `release_tasks` | `id BIGINT` | FK → `releases(id)`. Includes `planned_start_date`, `planned_end_date`, `planned_effort`. |
 | `release_time_entries` | `id BIGINT` | FK → `releases(id)`. |
 | `ticket_workload` | `ticket_id BIGINT` | FK → `tickets(id)`. Populated by `workload_sync.py`, NOT `replicator.py`. Tracks `planned_effort`, `planned_start_date`, `planned_end_date`, `last_checked_at`. Separate cadence because these fields don't bump ticket `updated_at` and so are invisible to the main replicator's incremental sync. |
+| `sla_policies` | `id BIGINT` | Full reload every run (reference entity). Header columns + nested `applicable_to`/`sla_target`/`escalation` stored as JSON blobs. In the main replicator (NOT the planned `config_replicator.py`) so policy tweaks stay synced. |
+| `projects` | `id BIGINT` | NewGen projects (`pm/` namespace). Full reload every run. In the main replicator, not a standalone script — projects see growing use and need regular re-sync. |
+| `project_tasks` | `id BIGINT` | FK → `projects(id)`. DELETE+re-INSERT per project each run. |
+| `project_members` | `id BIGINT` | FK → `projects(id)`. DELETE+re-INSERT per project each run. |
 
 Indexes on `tickets`: `updated_at`, `status`, `requester_id`, `responder_id`.
 
 ### Planned tables (not yet implemented)
 
-**projects_replicator.py:**
-| Table | Key | Notes |
-|---|---|---|
-| `projects` | `id BIGINT` | Project header records. |
-| `project_tasks` | `id BIGINT` | FK → `projects(id)`. |
-| `project_milestones` | `id BIGINT` | FK → `projects(id)`. |
-| `project_members` | `(project_id, user_id)` | |
-| `project_task_time_entries` | `id BIGINT` | FK → `project_tasks(id)`. |
+> Note: entities that get adjusted over time and need regular re-syncing live in the main looping `replicator.py` (full-reload reference entities) rather than standalone scripts, so they can't be forgotten. `projects` and `sla_policies` were originally planned as standalone scripts but moved into the main replicator for this reason. Standalone Phase 2 scripts below are for rarely-changing / one-off config.
 
 **assets_replicator.py:**
 | Table | Key | Notes |
@@ -172,9 +169,10 @@ Indexes on `tickets`: `updated_at`, `status`, `requester_id`, `responder_id`.
 **config_replicator.py:**
 | Table | Key | Notes |
 |---|---|---|
-| `sla_policies` | `id BIGINT` | SLA definitions. Full reload. |
 | `canned_responses` | `id BIGINT` | Canned response templates. Full reload. |
 | `announcements` | `id BIGINT` | Announcements. Full reload. |
+
+(SLA policies were originally planned here but now live in the main `replicator.py` — see current tables above.)
 
 ---
 
@@ -296,7 +294,7 @@ Freshservice enforces API rate limits. When hit (HTTP 429), the code reads `Retr
 | Workload fields (planned_*) | Captured by `workload_sync.py` into `ticket_workload` table — separate process, own schedule |
 | Conversations / Tasks / Time Entries | Re-fetched for tickets that appeared in the ticket sync window |
 | Problems / Changes / Releases | `updated_since` watermark — same pattern as tickets |
-| Agents / Requesters / Groups / Departments / Locations | Full reload every run (no `updated_since` filter, small datasets, ~30s overhead). Adds separate `sync_log` entries for `agent_group_members` and `requester_group_members`. |
+| Agents / Requesters / Groups / Departments / Locations / SLA policies / Projects | Full reload every run (no `updated_since` filter, small datasets, ~30s overhead). Adds separate `sync_log` entries for `agent_group_members` and `requester_group_members`. Projects also re-sync `project_tasks` and `project_members` per run. |
 
 ---
 
@@ -304,9 +302,10 @@ Freshservice enforces API rate limits. When hit (HTTP 429), the code reads `Retr
 
 Phase 1 is complete. Implement Phase 2 in this order:
 
+Projects and SLA policies are done — both folded into the main `replicator.py` (not standalone scripts) because they change over time and need regular re-syncing. Remaining Phase 2 work:
+
 ### Phase 2 — new replicators
-1. `projects_replicator.py` — projects, tasks, milestones, members, task time entries
-2. `assets_replicator.py` — assets (incremental), relationships, components
-3. `catalog_replicator.py` — service catalog categories + items
-4. `kb_replicator.py` — solution categories, folders, published articles
-5. `config_replicator.py` — SLAs, canned responses, announcements
+1. `assets_replicator.py` — assets (incremental), relationships, components
+2. `catalog_replicator.py` — service catalog categories + items
+3. `kb_replicator.py` — solution categories, folders, published articles
+4. `config_replicator.py` — canned responses, announcements

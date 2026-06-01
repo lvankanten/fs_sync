@@ -100,7 +100,7 @@ def main():
                 "ticket_time_entries", "ticket_tasks", "conversations", "tickets",
                 "agent_group_members", "agent_groups",
                 "requester_group_members", "requester_groups",
-                "agents", "requesters", "departments", "locations", "sync_log",
+                "agents", "requesters", "departments", "locations", "sla_policies", "sync_log",
             ]
             cur = conn.cursor()
             for table in drop_order:
@@ -126,7 +126,7 @@ def main():
             "tickets", "problems", "changes", "releases", "projects",
             "agent_group_members", "agent_groups",
             "requester_group_members", "requester_groups",
-            "agents", "requesters", "departments", "locations", "sync_log",
+            "agents", "requesters", "departments", "locations", "sla_policies", "sync_log",
         ]
         log.info("Truncating all tables (schema preserved)...")
         cur = conn.cursor()
@@ -299,6 +299,7 @@ def _run_sync_cycle(conn, client, args, db, syncers):
         ("requester_groups", lambda: syncers.sync_requester_groups(conn, client)),
         ("departments",      lambda: syncers.sync_departments(conn, client)),
         ("locations",        lambda: syncers.sync_locations(conn, client)),
+        ("sla_policies",     lambda: syncers.sync_sla_policies(conn, client)),
     ]
 
     errors = []

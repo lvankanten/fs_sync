@@ -114,6 +114,12 @@ class FreshserviceClient:
     def get_locations(self) -> list:
         return self._paginate("locations", "locations")
 
+    # ── SLA policies ──────────────────────────────────────────────────────────
+
+    def get_sla_policies(self) -> list:
+        """Return all SLA policies. Small dataset — full reload per run."""
+        return self._paginate("sla_policies", "sla_policies")
+
     # ── problems ──────────────────────────────────────────────────────────────
 
     def get_all_problems(self, updated_since: str = None, max_pages: int = None) -> list:

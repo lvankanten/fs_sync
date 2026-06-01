@@ -67,7 +67,7 @@ CREATE TABLE requesters (
     location_name           NVARCHAR(200)       NULL,
     background_information  NVARCHAR(MAX)       NULL,
     reporting_manager_id    BIGINT              NULL,
-    department_id           BIGINT              NULL,
+    department_ids_json     NVARCHAR(MAX)       NULL,
     active                  BIT                 NULL,
     created_at              DATETIMEOFFSET(0)   NULL,
     updated_at              DATETIMEOFFSET(0)   NULL,
@@ -261,6 +261,34 @@ CREATE TABLE locations (
     replicated_at       DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
     CONSTRAINT PK_locations PRIMARY KEY (id)
 );
+
+IF OBJECT_ID('sla_policies', 'U') IS NULL
+CREATE TABLE sla_policies (
+    id                  BIGINT              NOT NULL,
+    name                NVARCHAR(200)       NULL,
+    description         NVARCHAR(MAX)       NULL,
+    is_default          BIT                 NULL,
+    active              BIT                 NULL,
+    deleted             BIT                 NULL,
+    position            INT                 NULL,
+    parent_entity       NVARCHAR(50)        NULL,
+    workspace_id        BIGINT              NULL,
+    applicable_to_json  NVARCHAR(MAX)       NULL,
+    sla_targets_json    NVARCHAR(MAX)       NULL,
+    escalation_json     NVARCHAR(MAX)       NULL,
+    created_at          DATETIMEOFFSET(0)   NULL,
+    updated_at          DATETIMEOFFSET(0)   NULL,
+    replicated_at       DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    CONSTRAINT PK_sla_policies PRIMARY KEY (id)
+);
+
+-- Migrate sla_policies created before the sla_targets fix:
+-- the API field is sla_targets (plural, an array), not sla_target; also capture parent_entity/workspace_id/deleted.
+IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'sla_policies' AND COLUMN_NAME = 'sla_target_json')
+    EXEC sp_rename 'sla_policies.sla_target_json', 'sla_targets_json', 'COLUMN'
+
+IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'sla_policies' AND COLUMN_NAME = 'parent_entity')
+    ALTER TABLE sla_policies ADD parent_entity NVARCHAR(50) NULL, workspace_id BIGINT NULL, deleted BIT NULL
 
 IF OBJECT_ID('problems', 'U') IS NULL
 CREATE TABLE problems (

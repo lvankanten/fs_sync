@@ -119,7 +119,7 @@ def sync_requesters(conn, client: FreshserviceClient, active_only: bool = True) 
             "location_name":            r.get("location_name"),
             "background_information":   r.get("background_information"),
             "reporting_manager_id":     r.get("reporting_manager_id"),
-            "department_id":            r.get("department_id"),
+            "department_ids_json":      _json_or_none(r.get("department_ids")),
             "active":                   bool(r.get("active")) if r.get("active") is not None else None,
             "created_at":               _parse_dt(r.get("created_at")),
             "updated_at":               _parse_dt(r.get("updated_at")),
@@ -785,6 +785,36 @@ def sync_locations(conn, client: FreshserviceClient) -> int:
     for i in range(0, len(rows), _BATCH):
         total += db.merge_rows(conn, "locations", "id", rows[i:i + _BATCH])
     log.info("Locations: %d rows upserted.", total)
+    return total
+
+
+# ── SLA policies ────────────────────────────────────────────────────────────────
+
+def sync_sla_policies(conn, client: FreshserviceClient) -> int:
+    log.info("Syncing SLA policies...")
+    raw = client.get_sla_policies()
+    rows = []
+    for s in raw:
+        rows.append({
+            "id":                  s.get("id"),
+            "name":                s.get("name"),
+            "description":         s.get("description"),
+            "is_default":          _bool_or_none(s.get("is_default")),
+            "active":              _bool_or_none(s.get("active")),
+            "deleted":             _bool_or_none(s.get("deleted")),
+            "position":            s.get("position"),
+            "parent_entity":       s.get("parent_entity"),
+            "workspace_id":        s.get("workspace_id"),
+            "applicable_to_json":  _json_or_none(s.get("applicable_to")),
+            "sla_targets_json":    _json_or_none(s.get("sla_targets")),
+            "escalation_json":     _json_or_none(s.get("escalation")),
+            "created_at":          _parse_dt(s.get("created_at")),
+            "updated_at":          _parse_dt(s.get("updated_at")),
+        })
+    total = 0
+    for i in range(0, len(rows), _BATCH):
+        total += db.merge_rows(conn, "sla_policies", "id", rows[i:i + _BATCH])
+    log.info("SLA policies: %d rows upserted.", total)
     return total
 
 
