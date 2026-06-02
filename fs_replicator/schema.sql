@@ -565,6 +565,9 @@ IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'rele
 IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'sync_log' AND COLUMN_NAME = 'cursor_id')
     ALTER TABLE sync_log ADD cursor_id BIGINT NULL
 
+IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'sync_log' AND COLUMN_NAME = 'backfill_completed_at')
+    ALTER TABLE sync_log ADD backfill_completed_at DATETIMEOFFSET(0) NULL
+
 IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'agents' AND COLUMN_NAME = 'location_id')
     ALTER TABLE agents ADD location_id BIGINT NULL
 
@@ -698,3 +701,21 @@ CREATE TABLE project_members (
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_project_members_project_id' AND object_id = OBJECT_ID('project_members'))
     CREATE INDEX IX_project_members_project_id ON project_members (project_id);
+
+-- Agent roles lookup. Resolves the role_id values embedded in agents.roles_json
+-- (which only carry role_id + assignment_scope) to human-readable names.
+-- Reference entity: small dataset, full reload every run. `default` is a SQL
+-- reserved word so the API's `default` flag is stored as is_default (cf. sla_policies).
+IF OBJECT_ID('roles', 'U') IS NULL
+CREATE TABLE roles (
+    id              BIGINT              NOT NULL,
+    name            NVARCHAR(200)       NULL,
+    description     NVARCHAR(MAX)       NULL,
+    is_default      BIT                 NULL,
+    role_type       SMALLINT            NULL,
+    scopes_json     NVARCHAR(MAX)       NULL,
+    created_at      DATETIMEOFFSET(0)   NULL,
+    updated_at      DATETIMEOFFSET(0)   NULL,
+    replicated_at   DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    CONSTRAINT PK_roles PRIMARY KEY (id)
+);

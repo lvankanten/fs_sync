@@ -137,6 +137,44 @@ def clear_backfill_cursor(conn: pymssql.Connection, entity: str) -> None:
     cur.close()
 
 
+def get_backfill_completed(conn: pymssql.Connection, entity: str) -> datetime | None:
+    """Return the timestamp this entity last finished a full backfill, or None if it
+    never has (or was reset). Used to skip already-finished entities when a backfill
+    is resumed after an interruption."""
+    cur = conn.cursor()
+    cur.execute("SELECT backfill_completed_at FROM sync_log WHERE entity = %s", entity)
+    row = cur.fetchone()
+    cur.close()
+    return row[0] if row and row[0] is not None else None
+
+
+def mark_backfill_complete(conn: pymssql.Connection, entity: str) -> None:
+    """Mark an entity as fully backfilled (server timestamp) and clear its resume cursor.
+    Inserts a sync_log row if one doesn't exist yet (e.g. an entity with zero parent IDs)."""
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE sync_log SET backfill_completed_at = SYSDATETIMEOFFSET(), cursor_id = NULL WHERE entity = %s",
+        entity,
+    )
+    if cur.rowcount == 0:
+        cur.execute(
+            "INSERT INTO sync_log (entity, last_run_at, rows_affected, status, backfill_completed_at) "
+            "VALUES (%s, SYSDATETIMEOFFSET(), 0, 'success', SYSDATETIMEOFFSET())",
+            entity,
+        )
+    conn.commit()
+    cur.close()
+
+
+def clear_backfill_completed(conn: pymssql.Connection, entity: str) -> None:
+    """Clear the backfill-complete marker so the entity is reprocessed on the next
+    backfill (used to start a fresh campaign once every entity is already done)."""
+    cur = conn.cursor()
+    cur.execute("UPDATE sync_log SET backfill_completed_at = NULL WHERE entity = %s", entity)
+    conn.commit()
+    cur.close()
+
+
 def ensure_custom_field_column(
     conn: pymssql.Connection, field_name: str, field_type: str, table: str = "tickets"
 ) -> None:
@@ -177,5 +215,11 @@ def run_schema_file(conn: pymssql.Connection, schema_path: str) -> None:
             cur.execute(stmt)
             conn.commit()
         except Exception as e:
-            log.warning("Schema statement warning (may be harmless): %s", e)
+            # autocommit is off: a failed statement aborts the transaction, so we
+            # MUST roll back before the next statement — otherwise every subsequent
+            # statement fails with the original error and later tables never get
+            # created. Log the offending statement's first line so failures aren't silent.
+            conn.rollback()
+            first_line = stmt.splitlines()[0] if stmt.splitlines() else stmt
+            log.warning("Schema statement failed (skipped): %s | first line: %s", e, first_line)
     log.info("Schema setup complete.")

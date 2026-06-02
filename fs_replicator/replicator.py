@@ -100,7 +100,7 @@ def main():
                 "ticket_time_entries", "ticket_tasks", "conversations", "tickets",
                 "agent_group_members", "agent_groups",
                 "requester_group_members", "requester_groups",
-                "agents", "requesters", "departments", "locations", "sla_policies", "sync_log",
+                "agents", "requesters", "departments", "locations", "sla_policies", "roles", "sync_log",
             ]
             cur = conn.cursor()
             for table in drop_order:
@@ -126,7 +126,7 @@ def main():
             "tickets", "problems", "changes", "releases", "projects",
             "agent_group_members", "agent_groups",
             "requester_group_members", "requester_groups",
-            "agents", "requesters", "departments", "locations", "sla_policies", "sync_log",
+            "agents", "requesters", "departments", "locations", "sla_policies", "roles", "sync_log",
         ]
         log.info("Truncating all tables (schema preserved)...")
         cur = conn.cursor()
@@ -154,7 +154,11 @@ def main():
             return ids
 
         def _backfill_entity(entity, all_ids, sync_fn_factory):
-            """Process all_ids in chunks, reconnecting between chunks. Resumes from cursor if interrupted."""
+            """Process all_ids in chunks, reconnecting between chunks. Resumes from cursor if
+            interrupted. Entities already finished earlier in this campaign are skipped entirely."""
+            if entity in completed_entities:
+                log.info("  %s: already backfilled this campaign — skipping.", entity)
+                return 0
             # Read resume cursor
             c0 = _fresh_conn()
             cursor_id = db.get_backfill_cursor(c0, entity)
@@ -183,15 +187,40 @@ def main():
                     raise
                 finally:
                     c.close()
-            # Clear cursor now that entity is fully done
+            # Mark entity fully done (also clears the resume cursor) so a backfill resumed
+            # after an interruption skips it instead of reprocessing every parent ID.
             c_final = _fresh_conn()
-            db.clear_backfill_cursor(c_final, entity)
+            db.mark_backfill_complete(c_final, entity)
             c_final.close()
             return total
 
         errors = []
         log.info("=== Backfill sub-entities mode ===")
         backfill_start = datetime.now(timezone.utc)
+
+        # Campaign logic — distinguish "interrupted, now resuming" from "deliberate fresh re-run":
+        #   • If EVERY sub-entity is already marked complete, treat this invocation as a brand-new
+        #     full backfill: reset the markers and run them all (matches the old always-rerun behavior).
+        #   • Otherwise we're resuming an interrupted campaign: skip the entities that already finished
+        #     and only process the rest. This avoids re-issuing one API call per parent ID for entities
+        #     that completed before the interruption (e.g. a dropped VPN).
+        ALL_BACKFILL_ENTITIES = [
+            "conversations", "ticket_tasks", "ticket_time_entries",
+            "problem_conversations", "problem_tasks", "problem_time_entries",
+            "change_conversations", "change_tasks", "change_time_entries",
+            "release_conversations", "release_tasks", "release_time_entries",
+        ]
+        c_camp = _fresh_conn()
+        completed_entities = {e for e in ALL_BACKFILL_ENTITIES if db.get_backfill_completed(c_camp, e)}
+        if len(completed_entities) == len(ALL_BACKFILL_ENTITIES):
+            log.info("All sub-entities already backfilled — starting a fresh campaign (resetting completion markers).")
+            for e in ALL_BACKFILL_ENTITIES:
+                db.clear_backfill_completed(c_camp, e)
+            completed_entities = set()
+        elif completed_entities:
+            log.info("Resuming backfill — %d entities already complete, will be skipped: %s",
+                     len(completed_entities), ", ".join(sorted(completed_entities)))
+        c_camp.close()
 
         ticket_ids = _load_ids("tickets")
         log.info("Backfilling sub-entities for %d tickets...", len(ticket_ids))
@@ -300,6 +329,7 @@ def _run_sync_cycle(conn, client, args, db, syncers):
         ("departments",      lambda: syncers.sync_departments(conn, client)),
         ("locations",        lambda: syncers.sync_locations(conn, client)),
         ("sla_policies",     lambda: syncers.sync_sla_policies(conn, client)),
+        ("roles",            lambda: syncers.sync_roles(conn, client)),
     ]
 
     errors = []

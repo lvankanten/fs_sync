@@ -120,6 +120,13 @@ class FreshserviceClient:
         """Return all SLA policies. Small dataset — full reload per run."""
         return self._paginate("sla_policies", "sla_policies")
 
+    # ── roles ─────────────────────────────────────────────────────────────────
+
+    def get_roles(self) -> list:
+        """Return all agent roles. Lookup for the role_id values in agents.roles_json.
+        Small dataset — full reload per run."""
+        return self._paginate("roles", "roles")
+
     # ── problems ──────────────────────────────────────────────────────────────
 
     def get_all_problems(self, updated_since: str = None, max_pages: int = None) -> list:

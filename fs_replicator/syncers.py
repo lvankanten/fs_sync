@@ -818,6 +818,30 @@ def sync_sla_policies(conn, client: FreshserviceClient) -> int:
     return total
 
 
+# ── roles ─────────────────────────────────────────────────────────────────────
+
+def sync_roles(conn, client: FreshserviceClient) -> int:
+    log.info("Syncing roles...")
+    raw = client.get_roles()
+    rows = []
+    for r in raw:
+        rows.append({
+            "id":           r.get("id"),
+            "name":         r.get("name"),
+            "description":  r.get("description"),
+            "is_default":   _bool_or_none(r.get("default")),
+            "role_type":    r.get("role_type"),
+            "scopes_json":  _json_or_none(r.get("scopes")),
+            "created_at":   _parse_dt(r.get("created_at")),
+            "updated_at":   _parse_dt(r.get("updated_at")),
+        })
+    total = 0
+    for i in range(0, len(rows), _BATCH):
+        total += db.merge_rows(conn, "roles", "id", rows[i:i + _BATCH])
+    log.info("Roles: %d rows upserted.", total)
+    return total
+
+
 # ── problems ──────────────────────────────────────────────────────────────────
 
 def _discover_entity_custom_fields(conn, client_get_fn, table: str) -> dict:

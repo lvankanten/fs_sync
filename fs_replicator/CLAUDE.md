@@ -109,7 +109,7 @@ All ID and foreign key columns use `BIGINT` — Freshservice IDs exceed SQL Serv
 
 | Table | Key | Notes |
 |---|---|---|
-| `sync_log` | `entity` (PK) | Watermark per entity. `last_synced_at = NULL` triggers full load. `cursor_id BIGINT` for backfill resume. |
+| `sync_log` | `entity` (PK) | Watermark per entity. `last_synced_at = NULL` triggers full load. `cursor_id BIGINT` for mid-entity backfill resume. `backfill_completed_at DATETIMEOFFSET` marks an entity as fully backfilled so a resumed backfill skips it. |
 | `tickets` | `id BIGINT` | All ticket fields + `custom_fields_json` (full JSON blob). `planned_effort NVARCHAR(50)` — Workload Management field. Multi-select custom fields stored as comma-joined strings. |
 | `conversations` | `id BIGINT` | FK → `tickets(id)`. DELETE+re-INSERT per ticket on each sync. |
 | `ticket_tasks` | `id BIGINT` | FK → `tickets(id)`. Tasks assigned to agents on tickets. Includes `planned_start_date`, `planned_end_date`, `planned_effort`. |
@@ -136,6 +136,7 @@ All ID and foreign key columns use `BIGINT` — Freshservice IDs exceed SQL Serv
 | `release_time_entries` | `id BIGINT` | FK → `releases(id)`. |
 | `ticket_workload` | `ticket_id BIGINT` | FK → `tickets(id)`. Populated by `workload_sync.py`, NOT `replicator.py`. Tracks `planned_effort`, `planned_start_date`, `planned_end_date`, `last_checked_at`. Separate cadence because these fields don't bump ticket `updated_at` and so are invisible to the main replicator's incremental sync. |
 | `sla_policies` | `id BIGINT` | Full reload every run (reference entity). Header columns + nested `applicable_to`/`sla_target`/`escalation` stored as JSON blobs. In the main replicator (NOT the planned `config_replicator.py`) so policy tweaks stay synced. |
+| `roles` | `id BIGINT` | Agent roles lookup. Full reload every run (reference entity). Resolves the `role_id` values in `agents.roles_json` (which only carry `role_id` + `assignment_scope`) to names. API's `default` flag stored as `is_default` (`default` is a SQL reserved word). |
 | `projects` | `id BIGINT` | NewGen projects (`pm/` namespace). Full reload every run. In the main replicator, not a standalone script — projects see growing use and need regular re-sync. |
 | `project_tasks` | `id BIGINT` | FK → `projects(id)`. DELETE+re-INSERT per project each run. |
 | `project_members` | `id BIGINT` | FK → `projects(id)`. DELETE+re-INSERT per project each run. |
@@ -194,7 +195,9 @@ Indexes on `tickets`: `updated_at`, `status`, `requester_id`, `responder_id`.
 - `ensure_custom_field_column(conn, field_name, field_type)` — auto-DDL: adds `cf_` column to tickets if missing
 - `write_sync_log(conn, entity, status, rows, ...)` — MERGE upsert into sync_log. Uses `COALESCE(s.cursor_id, t.cursor_id)` to preserve cursor on non-backfill writes.
 - `get_backfill_cursor(conn, entity)` — reads cursor_id for backfill resume
-- `clear_backfill_cursor(conn, entity)` — explicitly sets cursor_id to NULL when backfill completes
+- `clear_backfill_cursor(conn, entity)` — explicitly sets cursor_id to NULL
+- `mark_backfill_complete(conn, entity)` — stamps `backfill_completed_at` and clears cursor when an entity fully finishes (inserts a sync_log row if none exists, e.g. a zero-ID entity)
+- `get_backfill_completed(conn, entity)` / `clear_backfill_completed(conn, entity)` — read / reset the completion marker; used by the backfill campaign logic to skip finished entities on resume
 
 ### `syncers.py`
 - All direct cursor SQL uses `%s` placeholders (pymssql), not `?` (pyodbc)
@@ -270,7 +273,9 @@ Changing `planned_effort`, `planned_start_date`, or `planned_end_date` (via API 
 Fetches 300 newest tickets/problems/changes/releases (1 API page each), writes a real watermark. Then run incremental to validate the full pipeline end-to-end without processing all records.
 
 ### Backfill with cursor-based resume
-`--backfill-sub-entities` processes ticket/problem/change/release IDs in chunks of 500, reconnecting to SQL Server between chunks to avoid DBPROCESS dead (error 20047) after ~2 hours. After each chunk, writes the last processed parent ID to `sync_log.cursor_id`. On restart, reads cursor and skips already-processed IDs. When an entity fully completes, cursor is cleared via `clear_backfill_cursor`. The `write_sync_log` MERGE uses `COALESCE(s.cursor_id, t.cursor_id)` so non-backfill writes (e.g., normal incremental sync) do not wipe an in-progress cursor.
+`--backfill-sub-entities` processes ticket/problem/change/release IDs in chunks of 500, reconnecting to SQL Server between chunks to avoid DBPROCESS dead (error 20047) after ~2 hours. After each chunk, writes the last processed parent ID to `sync_log.cursor_id`. On restart, reads cursor and skips already-processed IDs *within* an entity. When an entity fully completes, `mark_backfill_complete` stamps `sync_log.backfill_completed_at` and clears the cursor. The `write_sync_log` MERGE uses `COALESCE(s.cursor_id, t.cursor_id)` so non-backfill writes (e.g., normal incremental sync) do not wipe an in-progress cursor, and it leaves `backfill_completed_at` untouched so the marker survives incremental runs.
+
+**Campaign logic (skip completed entities on resume):** `cursor_id = NULL` alone can't distinguish "never started" from "finished," so an interrupted resume used to reprocess every already-completed entity from scratch (one API call per parent ID, even for zero-row entities like `ticket_tasks` across ~40k tickets). `backfill_completed_at` fixes this. At startup the backfill checks all 12 sub-entities: if **every** one is already complete it treats the run as a deliberate fresh full backfill — clears all markers and runs everything (matches the old always-rerun behavior); if **only some** are complete it's a resume — those entities are skipped and only the unfinished ones run. So a dropped VPN mid-backfill now costs only the unfinished entities on restart, not the whole set. Markers are per-entity in `sync_log`; `clear_backfill_completed` resets one.
 
 ### TRUNCATE → DELETE FROM
 SQL Server does not allow `TRUNCATE TABLE` on a table referenced by FK constraints, even if the child tables are empty. `--truncate` uses `DELETE FROM` instead.
@@ -294,7 +299,7 @@ Freshservice enforces API rate limits. When hit (HTTP 429), the code reads `Retr
 | Workload fields (planned_*) | Captured by `workload_sync.py` into `ticket_workload` table — separate process, own schedule |
 | Conversations / Tasks / Time Entries | Re-fetched for tickets that appeared in the ticket sync window |
 | Problems / Changes / Releases | `updated_since` watermark — same pattern as tickets |
-| Agents / Requesters / Groups / Departments / Locations / SLA policies / Projects | Full reload every run (no `updated_since` filter, small datasets, ~30s overhead). Adds separate `sync_log` entries for `agent_group_members` and `requester_group_members`. Projects also re-sync `project_tasks` and `project_members` per run. |
+| Agents / Requesters / Groups / Departments / Locations / SLA policies / Roles / Projects | Full reload every run (no `updated_since` filter, small datasets, ~30s overhead). Adds separate `sync_log` entries for `agent_group_members` and `requester_group_members`. Projects also re-sync `project_tasks` and `project_members` per run. |
 
 ---
 
