@@ -580,6 +580,64 @@ def sync_ticket_time_entries(conn, client: FreshserviceClient, ticket_ids: list[
     return total
 
 
+# ── ticket activities ─────────────────────────────────────────────────────────
+
+def sync_ticket_activities(conn, client: FreshserviceClient, ticket_ids: list[int]) -> int:
+    """Re-fetch and replace activity audit entries for all given ticket IDs.
+
+    The API returns no id on individual activities. We DELETE WHERE ticket_id=?
+    then INSERT all current activities; a surrogate IDENTITY PK is assigned by SQL.
+    """
+    if not ticket_ids:
+        return 0
+
+    log.info("Syncing activities for %d tickets...", len(ticket_ids))
+    cur = conn.cursor()
+    total = 0
+
+    for tid in ticket_ids:
+        try:
+            acts = client.get_ticket_activities(tid)
+        except Exception as e:
+            if "404" in str(e):
+                log.warning("  ticket_activities endpoint not available on this plan — skipping.")
+                return 0
+            log.warning("  Could not fetch activities for ticket %d: %s", tid, e)
+            continue
+
+        cur.execute("DELETE FROM ticket_activities WHERE ticket_id = %s", tid)
+        conn.commit()
+
+        if acts:
+            cur.executemany(
+                """
+                INSERT INTO ticket_activities
+                    (ticket_id, actor_id, actor_name, actor_is_agent,
+                     content, sub_contents, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                [
+                    (
+                        tid,
+                        (a.get("actor") or {}).get("id"),
+                        (a.get("actor") or {}).get("name"),
+                        bool((a.get("actor") or {}).get("is_agent")) if (a.get("actor") or {}).get("is_agent") is not None else None,
+                        a.get("content"),
+                        json.dumps(a["sub_contents"]) if a.get("sub_contents") else None,
+                        _parse_dt(a.get("created_at")),
+                    )
+                    for a in acts
+                ],
+            )
+            conn.commit()
+            total += len(acts)
+
+        time.sleep(0.05)
+
+    log.info("Ticket activities: %d rows inserted.", total)
+    return total
+
+
 # ── shared helpers for problem / change / release sub-entities ────────────────
 
 def _sync_conversations_for(

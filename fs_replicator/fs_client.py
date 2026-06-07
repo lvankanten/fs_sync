@@ -84,6 +84,10 @@ class FreshserviceClient:
         """Return all time entries for a ticket."""
         return self._paginate(f"tickets/{ticket_id}/time_entries", "time_entries")
 
+    def get_ticket_activities(self, ticket_id: int) -> list:
+        """Return all activity audit entries for a ticket."""
+        return self._paginate(f"tickets/{ticket_id}/activities", "activities")
+
     # ── agents & requesters ───────────────────────────────────────────────────
 
     def get_agents(self) -> list:

@@ -114,6 +114,7 @@ All ID and foreign key columns use `BIGINT` — Freshservice IDs exceed SQL Serv
 | `conversations` | `id BIGINT` | FK → `tickets(id)`. DELETE+re-INSERT per ticket on each sync. |
 | `ticket_tasks` | `id BIGINT` | FK → `tickets(id)`. Tasks assigned to agents on tickets. Includes `planned_start_date`, `planned_end_date`, `planned_effort`. |
 | `ticket_time_entries` | `id BIGINT` | FK → `tickets(id)`. Time logged by agents on tickets. |
+| `ticket_activities` | `id BIGINT IDENTITY` | FK → `tickets(id)`. Audit log of ticket actions (status changes, assignments, field updates, etc.). API returns no id on individual activities, so a surrogate IDENTITY PK is used; DELETE+INSERT per ticket on each sync. `sub_contents` stored as JSON when present. |
 | `agents` | `id BIGINT` | Never hard-deleted (referential integrity). Profile + permission/role fields: `has_logged_in`, `last_active_at`, `last_login_at`, `occasional`, `auto_assign_tickets`, `auto_assign_status_changed_at`, `can_see_all_tickets_from_associated_departments`, `api_key_enabled`, `work_schedule_id`, `language`, `time_format`. List-shaped fields stored as JSON: `roles_json`, `member_of_json`, `observer_of_json`, `member_of_pending_approval_json`, `observer_of_pending_approval_json`, `workspace_ids_json`, `department_ids_json`, `workload_configs_json`. Empty arrays → NULL (not `'[]'`). |
 | `requesters` | `id BIGINT` | Never hard-deleted. |
 | `agent_groups` | `id BIGINT` | `unassigned_for` is `NVARCHAR(50)` — API returns strings like `'4h'`. |
@@ -238,7 +239,7 @@ Each entity: read watermark → sync → write sync_log. Failure logs an error a
 | `GET /api/v2/tickets` (list endpoint) | Does NOT return `urgency`, `impact`, `planned_effort`, `planned_start_date`, `planned_end_date`, `resolution_notes`. These require individual ticket GETs. |
 | Workload Management fields (`planned_effort`, `planned_start_date`, `planned_end_date`) | Updating these fields does **not** bump `updated_at` on the ticket. This means the `updated_since` filter will not pick up changes to these fields unless another field on the ticket also changes. **Captured by `workload_sync.py` (separate script)** writing to the `ticket_workload` table — runs on its own schedule, not part of `replicator.py`. |
 | Problem conversations (`/problems/{id}/conversations`) | Returns 404 on this plan. Detected on first call and skipped. |
-| Conversations / Tasks / Time Entries | No `updated_since` filter. Re-fetched per parent record on every incremental run. |
+| Conversations / Tasks / Time Entries / Activities | No `updated_since` filter. Re-fetched per parent record on every incremental run. Activities additionally have no `id` field in the API response, so a surrogate IDENTITY PK is used. |
 | Agents / Requesters / Groups / Departments / Locations | No `updated_since` filter. Full reload on `--full` only. |
 | `planned_effort` | Part of Workload Management module. Returned as top-level ticket field (not a custom field). Data type is `NVARCHAR(50)` (duration string like `'4h'`). |
 | Multi-select custom fields | API returns as Python lists (e.g. `[]`). Must be comma-joined before SQL insert — pymssql cannot bind a list as a parameter. |
@@ -297,7 +298,7 @@ Freshservice enforces API rate limits. When hit (HTTP 429), the code reads `Retr
 |---|---|
 | Tickets | `updated_since` watermark — only changed tickets fetched via list endpoint |
 | Workload fields (planned_*) | Captured by `workload_sync.py` into `ticket_workload` table — separate process, own schedule |
-| Conversations / Tasks / Time Entries | Re-fetched for tickets that appeared in the ticket sync window |
+| Conversations / Tasks / Time Entries / Activities | Re-fetched for tickets that appeared in the ticket sync window |
 | Problems / Changes / Releases | `updated_since` watermark — same pattern as tickets |
 | Agents / Requesters / Groups / Departments / Locations / SLA policies / Roles / Projects | Full reload every run (no `updated_since` filter, small datasets, ~30s overhead). Adds separate `sync_log` entries for `agent_group_members` and `requester_group_members`. Projects also re-sync `project_tasks` and `project_members` per run. |
 

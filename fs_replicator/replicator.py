@@ -97,7 +97,7 @@ def main():
                 "release_time_entries", "release_tasks", "release_conversations", "releases",
                 "change_time_entries", "change_tasks", "change_conversations", "changes",
                 "problem_time_entries", "problem_tasks", "problem_conversations", "problems",
-                "ticket_time_entries", "ticket_tasks", "conversations", "tickets",
+                "ticket_activities", "ticket_time_entries", "ticket_tasks", "conversations", "tickets",
                 "agent_group_members", "agent_groups",
                 "requester_group_members", "requester_groups",
                 "agents", "requesters", "departments", "locations", "sla_policies", "roles", "sync_log",
@@ -118,7 +118,7 @@ def main():
     # ── truncate mode ─────────────────────────────────────────────────────────
     if args.truncate:
         truncate_order = [
-            "conversations", "ticket_tasks", "ticket_time_entries",
+            "conversations", "ticket_tasks", "ticket_time_entries", "ticket_activities",
             "problem_conversations", "problem_tasks", "problem_time_entries",
             "change_conversations", "change_tasks", "change_time_entries",
             "release_conversations", "release_tasks", "release_time_entries",
@@ -205,7 +205,7 @@ def main():
         #     and only process the rest. This avoids re-issuing one API call per parent ID for entities
         #     that completed before the interruption (e.g. a dropped VPN).
         ALL_BACKFILL_ENTITIES = [
-            "conversations", "ticket_tasks", "ticket_time_entries",
+            "conversations", "ticket_tasks", "ticket_time_entries", "ticket_activities",
             "problem_conversations", "problem_tasks", "problem_time_entries",
             "change_conversations", "change_tasks", "change_time_entries",
             "release_conversations", "release_tasks", "release_time_entries",
@@ -228,6 +228,7 @@ def main():
             ("conversations",       lambda c: lambda ids: syncers.sync_conversations(c, client, ids)),
             ("ticket_tasks",        lambda c: lambda ids: syncers.sync_ticket_tasks(c, client, ids)),
             ("ticket_time_entries", lambda c: lambda ids: syncers.sync_ticket_time_entries(c, client, ids)),
+            ("ticket_activities",   lambda c: lambda ids: syncers.sync_ticket_activities(c, client, ids)),
         ]:
             try:
                 rows = _backfill_entity(entity, ticket_ids, fn_factory)
@@ -380,6 +381,7 @@ def _run_sync_cycle(conn, client, args, db, syncers):
             ("conversations",       lambda: syncers.sync_conversations(conn, client, ticket_ids)),
             ("ticket_tasks",        lambda: syncers.sync_ticket_tasks(conn, client, ticket_ids)),
             ("ticket_time_entries", lambda: syncers.sync_ticket_time_entries(conn, client, ticket_ids)),
+            ("ticket_activities",   lambda: syncers.sync_ticket_activities(conn, client, ticket_ids)),
         ]:
             try:
                 rows = fn()

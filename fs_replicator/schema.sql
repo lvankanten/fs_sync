@@ -185,6 +185,26 @@ CREATE TABLE conversations (
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_conversations_ticket_id' AND object_id = OBJECT_ID('conversations'))
     CREATE INDEX IX_conversations_ticket_id ON conversations (ticket_id);
 
+-- Activity audit log per ticket. API returns no IDs on individual activities,
+-- so we synthesize a surrogate PK and DELETE+INSERT per ticket on each sync.
+IF OBJECT_ID('ticket_activities', 'U') IS NULL
+CREATE TABLE ticket_activities (
+    id              BIGINT              IDENTITY(1,1) NOT NULL,
+    ticket_id       BIGINT              NOT NULL,
+    actor_id        BIGINT              NULL,
+    actor_name      NVARCHAR(200)       NULL,
+    actor_is_agent  BIT                 NULL,
+    content         NVARCHAR(MAX)       NULL,
+    sub_contents    NVARCHAR(MAX)       NULL,
+    created_at      DATETIMEOFFSET(0)   NULL,
+    replicated_at   DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    CONSTRAINT PK_ticket_activities PRIMARY KEY (id),
+    CONSTRAINT FK_ticket_activities_tickets FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_ticket_activities_ticket_id' AND object_id = OBJECT_ID('ticket_activities'))
+    CREATE INDEX IX_ticket_activities_ticket_id ON ticket_activities (ticket_id);
+
 IF OBJECT_ID('ticket_tasks', 'U') IS NULL
 CREATE TABLE ticket_tasks (
     id                  BIGINT              NOT NULL,
