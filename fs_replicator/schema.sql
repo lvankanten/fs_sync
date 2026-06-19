@@ -68,6 +68,9 @@ CREATE TABLE requesters (
     background_information  NVARCHAR(MAX)       NULL,
     reporting_manager_id    BIGINT              NULL,
     department_ids_json     NVARCHAR(MAX)       NULL,
+    can_see_all_tickets_from_associated_departments BIT NULL,
+    has_logged_in           BIT                 NULL,
+    secondary_emails        NVARCHAR(MAX)       NULL,
     active                  BIT                 NULL,
     created_at              DATETIMEOFFSET(0)   NULL,
     updated_at              DATETIMEOFFSET(0)   NULL,
@@ -610,6 +613,12 @@ CREATE TABLE ticket_workload (
 
 IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tickets' AND COLUMN_NAME = 'planned_effort')
     ALTER TABLE tickets DROP COLUMN planned_effort, planned_start_date, planned_end_date
+
+IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'requesters' AND COLUMN_NAME = 'can_see_all_tickets_from_associated_departments')
+    ALTER TABLE requesters ADD
+        can_see_all_tickets_from_associated_departments BIT NULL,
+        has_logged_in BIT NULL,
+        secondary_emails NVARCHAR(MAX) NULL
 
 IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'agents' AND COLUMN_NAME = 'has_logged_in')
     ALTER TABLE agents ADD
