@@ -641,6 +641,47 @@ def sync_ticket_activities(conn, client: FreshserviceClient, ticket_ids: list[in
     return total
 
 
+# ── deleted-ticket reconciliation ─────────────────────────────────────────────
+
+def reconcile_deleted_tickets(conn, client: FreshserviceClient) -> int:
+    """Mark replica rows for tickets that have been deleted in live FS.
+
+    The main /tickets list endpoint never returns deleted records, so without
+    this pass they'd linger forever as phantoms — frozen at pre-deletion state.
+    Soft-delete (set deleted=1) rather than hard DELETE preserves audit history.
+    """
+    log.info("Reconciling deleted tickets...")
+    try:
+        deleted = client.get_deleted_tickets()
+    except Exception as e:
+        log.warning("  Could not fetch deleted tickets: %s", e)
+        raise
+
+    deleted_ids = [t.get("id") for t in deleted if t.get("id") is not None]
+    if not deleted_ids:
+        log.info("  No deleted tickets returned by API.")
+        return 0
+
+    log.info("  %d deleted tickets returned by API; updating replica...", len(deleted_ids))
+    cur = conn.cursor()
+    marked = 0
+    # Chunk the IN-list to keep the parameter count well under SQL Server's limit.
+    CHUNK = 500
+    for i in range(0, len(deleted_ids), CHUNK):
+        chunk = deleted_ids[i:i + CHUNK]
+        placeholders = ", ".join(["%s"] * len(chunk))
+        cur.execute(
+            f"UPDATE tickets SET deleted = 1 WHERE id IN ({placeholders}) AND deleted = 0",
+            chunk,
+        )
+        marked += cur.rowcount
+        conn.commit()
+    cur.close()
+
+    log.info("Deleted-ticket reconciliation: %d row(s) newly marked deleted.", marked)
+    return marked
+
+
 # ── shared helpers for problem / change / release sub-entities ────────────────
 
 def _sync_conversations_for(

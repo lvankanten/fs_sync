@@ -153,6 +153,7 @@ CREATE TABLE tickets (
     closed_at           DATETIMEOFFSET(0)   NULL,
     resolution_notes    NVARCHAR(MAX)       NULL,
     custom_fields_json  NVARCHAR(MAX)       NULL,
+    deleted             BIT                 NOT NULL CONSTRAINT DF_tickets_deleted DEFAULT 0,
     replicated_at       DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
     CONSTRAINT PK_tickets PRIMARY KEY (id)
 );
@@ -619,6 +620,9 @@ IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'requ
         can_see_all_tickets_from_associated_departments BIT NULL,
         has_logged_in BIT NULL,
         secondary_emails NVARCHAR(MAX) NULL
+
+IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tickets' AND COLUMN_NAME = 'deleted')
+    ALTER TABLE tickets ADD deleted BIT NOT NULL CONSTRAINT DF_tickets_deleted DEFAULT 0
 
 IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'agents' AND COLUMN_NAME = 'has_logged_in')
     ALTER TABLE agents ADD

@@ -88,6 +88,14 @@ class FreshserviceClient:
         """Return all activity audit entries for a ticket."""
         return self._paginate(f"tickets/{ticket_id}/activities", "activities")
 
+    def get_deleted_tickets(self) -> list:
+        """Paginate all tickets currently in the trash (deleted=true in FS).
+
+        Used for post-sync reconciliation — the main /tickets endpoint never
+        returns deleted records, so we'd otherwise leave them as phantoms.
+        """
+        return self._paginate("tickets", "tickets", {"filter": "deleted"})
+
     # ── agents & requesters ───────────────────────────────────────────────────
 
     def get_agents(self) -> list:

@@ -525,6 +525,17 @@ def _run_sync_cycle(conn, client, args, db, syncers):
     else:
         log.info("No projects to sync sub-entities for.")
 
+    # ── deleted-ticket reconciliation ─────────────────────────────────────────
+    # The main /tickets endpoint never returns deleted records; without this
+    # pass they'd linger as phantoms with stale state. Runs every cycle.
+    try:
+        marked = syncers.reconcile_deleted_tickets(conn, client)
+        db.write_sync_log(conn, "deleted_tickets", "success", marked)
+    except Exception as e:
+        log.error("Deleted-ticket reconciliation failed: %s", e)
+        db.write_sync_log(conn, "deleted_tickets", "error", 0, error=str(e))
+        errors.append("deleted_tickets")
+
     if errors:
         log.warning("Cycle completed with errors in: %s", ", ".join(errors))
     else:

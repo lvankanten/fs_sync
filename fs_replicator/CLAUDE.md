@@ -110,7 +110,7 @@ All ID and foreign key columns use `BIGINT` — Freshservice IDs exceed SQL Serv
 | Table | Key | Notes |
 |---|---|---|
 | `sync_log` | `entity` (PK) | Watermark per entity. `last_synced_at = NULL` triggers full load. `cursor_id BIGINT` for mid-entity backfill resume. `backfill_completed_at DATETIMEOFFSET` marks an entity as fully backfilled so a resumed backfill skips it. |
-| `tickets` | `id BIGINT` | All ticket fields + `custom_fields_json` (full JSON blob). `planned_effort NVARCHAR(50)` — Workload Management field. Multi-select custom fields stored as comma-joined strings. |
+| `tickets` | `id BIGINT` | All ticket fields + `custom_fields_json` (full JSON blob). `planned_effort NVARCHAR(50)` — Workload Management field. Multi-select custom fields stored as comma-joined strings. `deleted BIT NOT NULL DEFAULT 0` — set by the post-sync reconciliation pass (see Known API Limitations). Reports should add `AND ISNULL(deleted, 0) = 0`. |
 | `conversations` | `id BIGINT` | FK → `tickets(id)`. DELETE+re-INSERT per ticket on each sync. |
 | `ticket_tasks` | `id BIGINT` | FK → `tickets(id)`. Tasks assigned to agents on tickets. Includes `planned_start_date`, `planned_end_date`, `planned_effort`. |
 | `ticket_time_entries` | `id BIGINT` | FK → `tickets(id)`. Time logged by agents on tickets. |
@@ -220,7 +220,7 @@ Indexes on `tickets`: `updated_at`, `status`, `requester_id`, `responder_id`.
 ### `replicator.py`
 Sync order respects FK constraints:
 - `--full` / `--test`: agents → requesters → groups → departments → locations → tickets → problems → changes → releases (+ sub-entities)
-- Incremental: agents → requesters → groups → departments → locations → tickets → conversations/tasks/time entries → problems → changes → releases (+ sub-entities). Reference entities are full-reloaded every run (small datasets, ~30s overhead). Workload fields (planned_*) handled separately by `workload_sync.py`.
+- Incremental: agents → requesters → groups → departments → locations → tickets → conversations/tasks/time entries/activities → problems → changes → releases (+ sub-entities) → projects → **deleted-ticket reconciliation**. Reference entities are full-reloaded every run (small datasets, ~30s overhead). Workload fields (planned_*) handled separately by `workload_sync.py`.
 
 Each entity: read watermark → sync → write sync_log. Failure logs an error and continues; watermark is NOT advanced on failure so the next run retries from the same point.
 
@@ -236,7 +236,8 @@ Each entity: read watermark → sync → write sync_log. Failure logs an error a
 |---|---|
 | `GET /api/v2/ticket_fields` | Returns 404 on this plan. Use `ticket_form_fields` instead. |
 | `GET /api/v2/tickets?include=description` | Returns 400 — not supported. |
-| `GET /api/v2/tickets` (list endpoint) | Does NOT return `urgency`, `impact`, `planned_effort`, `planned_start_date`, `planned_end_date`, `resolution_notes`. These require individual ticket GETs. |
+| `GET /api/v2/tickets` (list endpoint) | Does NOT return `urgency`, `impact`, `planned_effort`, `planned_start_date`, `planned_end_date`, `resolution_notes`. These require individual ticket GETs. Also never returns deleted (trashed) tickets — those must be fetched via `?filter=deleted` separately. See "Deleted tickets" below. |
+| Deleted tickets | The main list endpoint excludes deleted (trashed) tickets entirely. Without intervention they linger in the replica as phantoms — frozen at pre-deletion state, often appearing "open" with stale department references. Fix: `tickets.deleted BIT` column + post-sync reconciliation pass (`syncers.reconcile_deleted_tickets`) that pages `GET /api/v2/tickets?filter=deleted` and soft-deletes matches. Runs every cycle. Reports must filter `AND ISNULL(deleted, 0) = 0`. The signature of a deleted ticket from the API: GET works (returns it with `deleted=true`), PUT returns 405 "method not allowed". |
 | Workload Management fields (`planned_effort`, `planned_start_date`, `planned_end_date`) | Updating these fields does **not** bump `updated_at` on the ticket. This means the `updated_since` filter will not pick up changes to these fields unless another field on the ticket also changes. **Captured by `workload_sync.py` (separate script)** writing to the `ticket_workload` table — runs on its own schedule, not part of `replicator.py`. |
 | Problem conversations (`/problems/{id}/conversations`) | Returns 404 on this plan. Detected on first call and skipped. |
 | Conversations / Tasks / Time Entries / Activities | No `updated_since` filter. Re-fetched per parent record on every incremental run. Activities additionally have no `id` field in the API response, so a surrogate IDENTITY PK is used. |
