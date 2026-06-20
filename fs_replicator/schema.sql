@@ -153,7 +153,6 @@ CREATE TABLE tickets (
     closed_at           DATETIMEOFFSET(0)   NULL,
     resolution_notes    NVARCHAR(MAX)       NULL,
     custom_fields_json  NVARCHAR(MAX)       NULL,
-    deleted             BIT                 NOT NULL CONSTRAINT DF_tickets_deleted DEFAULT 0,
     replicated_at       DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
     CONSTRAINT PK_tickets PRIMARY KEY (id)
 );
@@ -621,8 +620,20 @@ IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'requ
         has_logged_in BIT NULL,
         secondary_emails NVARCHAR(MAX) NULL
 
-IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tickets' AND COLUMN_NAME = 'deleted')
-    ALTER TABLE tickets ADD deleted BIT NOT NULL CONSTRAINT DF_tickets_deleted DEFAULT 0
+-- Back out the short-lived soft-delete column. Decision (2026-06-20): hard-delete in
+-- the replica so consumers don't need an `AND deleted=0` filter. Removes already-flagged
+-- phantom rows + their child rows, then drops the column and its default constraint.
+IF EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tickets' AND COLUMN_NAME = 'deleted')
+BEGIN
+    DELETE FROM ticket_activities WHERE ticket_id IN (SELECT id FROM tickets WHERE deleted = 1);
+    DELETE FROM ticket_time_entries WHERE ticket_id IN (SELECT id FROM tickets WHERE deleted = 1);
+    DELETE FROM ticket_tasks WHERE ticket_id IN (SELECT id FROM tickets WHERE deleted = 1);
+    DELETE FROM conversations WHERE ticket_id IN (SELECT id FROM tickets WHERE deleted = 1);
+    DELETE FROM ticket_workload WHERE ticket_id IN (SELECT id FROM tickets WHERE deleted = 1);
+    DELETE FROM tickets WHERE deleted = 1;
+    ALTER TABLE tickets DROP CONSTRAINT DF_tickets_deleted;
+    ALTER TABLE tickets DROP COLUMN deleted;
+END
 
 IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'agents' AND COLUMN_NAME = 'has_logged_in')
     ALTER TABLE agents ADD

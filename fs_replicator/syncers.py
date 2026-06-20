@@ -644,11 +644,16 @@ def sync_ticket_activities(conn, client: FreshserviceClient, ticket_ids: list[in
 # ── deleted-ticket reconciliation ─────────────────────────────────────────────
 
 def reconcile_deleted_tickets(conn, client: FreshserviceClient) -> int:
-    """Mark replica rows for tickets that have been deleted in live FS.
+    """Hard-delete replica rows for tickets that have been deleted in live FS.
 
     The main /tickets list endpoint never returns deleted records, so without
     this pass they'd linger forever as phantoms — frozen at pre-deletion state.
-    Soft-delete (set deleted=1) rather than hard DELETE preserves audit history.
+    Hard-delete (rather than a soft `deleted` flag) keeps the replica clean at
+    the source so consumers don't need an `AND deleted=0` filter that can be
+    forgotten. Decision: Les, 2026-06-20.
+
+    Order: child tables first (FK), then tickets. If a deleted ticket is later
+    restored in FS, the normal upsert will re-insert it; no special handling.
     """
     log.info("Reconciling deleted tickets...")
     try:
@@ -662,24 +667,37 @@ def reconcile_deleted_tickets(conn, client: FreshserviceClient) -> int:
         log.info("  No deleted tickets returned by API.")
         return 0
 
-    log.info("  %d deleted tickets returned by API; updating replica...", len(deleted_ids))
+    log.info("  %d deleted tickets returned by API; removing from replica...", len(deleted_ids))
+    # Order matters: child tables first to satisfy FK constraints.
+    child_tables = (
+        "ticket_activities",
+        "ticket_time_entries",
+        "ticket_tasks",
+        "conversations",
+        "ticket_workload",
+    )
     cur = conn.cursor()
-    marked = 0
-    # Chunk the IN-list to keep the parameter count well under SQL Server's limit.
+    deleted_rows = 0
+    # Chunk to keep parameter count under SQL Server's limit.
     CHUNK = 500
     for i in range(0, len(deleted_ids), CHUNK):
         chunk = deleted_ids[i:i + CHUNK]
         placeholders = ", ".join(["%s"] * len(chunk))
+        for table in child_tables:
+            cur.execute(
+                f"DELETE FROM {table} WHERE ticket_id IN ({placeholders})",
+                chunk,
+            )
         cur.execute(
-            f"UPDATE tickets SET deleted = 1 WHERE id IN ({placeholders}) AND deleted = 0",
+            f"DELETE FROM tickets WHERE id IN ({placeholders})",
             chunk,
         )
-        marked += cur.rowcount
+        deleted_rows += cur.rowcount
         conn.commit()
     cur.close()
 
-    log.info("Deleted-ticket reconciliation: %d row(s) newly marked deleted.", marked)
-    return marked
+    log.info("Deleted-ticket reconciliation: %d row(s) removed from tickets.", deleted_rows)
+    return deleted_rows
 
 
 # ── shared helpers for problem / change / release sub-entities ────────────────
