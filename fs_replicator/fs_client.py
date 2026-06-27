@@ -101,9 +101,11 @@ class FreshserviceClient:
     def get_agents(self) -> list:
         return self._paginate("agents", "agents")
 
-    def get_requesters(self, active_only: bool = True) -> list:
-        """Paginate all requesters. Default active_only=True filters to active users
-        (~37% of total — saves significant API time)."""
+    def get_requesters(self, active_only: bool = False) -> list:
+        """Paginate all requesters. Default pulls both active and inactive so the
+        replica can detect deactivations; pass active_only=True to skip inactive
+        (faster, but the DB will then drift on any deactivation in FS until the
+        next full pull)."""
         params = {"active": "true"} if active_only else None
         return self._paginate("requesters", "requesters", params)
 

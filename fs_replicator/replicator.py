@@ -324,7 +324,7 @@ def _run_sync_cycle(conn, client, args, db, syncers):
     # Reference entities have no updated_since filter — full reload every run (small datasets, ~30s overhead).
     ENTITIES = [
         ("agents",           lambda: syncers.sync_agents(conn, client)),
-        ("requesters",       lambda: syncers.sync_requesters(conn, client, active_only=not args.full)),
+        ("requesters",       lambda: syncers.sync_requesters(conn, client)),
         ("agent_groups",     lambda: syncers.sync_agent_groups(conn, client)),
         ("requester_groups", lambda: syncers.sync_requester_groups(conn, client)),
         ("departments",      lambda: syncers.sync_departments(conn, client)),

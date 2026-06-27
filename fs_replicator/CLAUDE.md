@@ -211,7 +211,7 @@ Indexes on `tickets`: `updated_at`, `status`, `requester_id`, `responder_id`.
   - Custom field discovery via `get_ticket_fields()` runs at start of each ticket sync
 - `sync_conversations` — skipped on `--full`. Runs on incremental for tickets touched in that run.
 - `sync_agents` — full reload every run (no `updated_since` filter; small dataset).
-- `sync_requesters` — every run with `active_only=True` by default (passes `?active=true` to API, ~37% of total). `--full` passes `active_only=False` to pull active + inactive. Inactive requesters already in the DB are never deleted (FK integrity with tickets).
+- `sync_requesters` — every run pulls both active and inactive requesters so the replica can detect deactivations (a requester deactivated in FS would never be re-fetched under active-only and would drift in the DB). Inactive requesters are never deleted from the DB (FK integrity with tickets). The `active_only=True` path still exists in `fs_client.get_requesters` for ad-hoc use but is no longer the default.
 - `sync_agent_groups` / `sync_requester_groups` — full reload every run. Return `(groups, members)` tuple so the replicator writes separate `sync_log` entries for the parent table and `*_group_members` table.
 - `sync_departments` / `sync_locations` — full reload every run.
 - `sync_problems` / `sync_changes` / `sync_releases` — incremental via `updated_since`. Same detail-only field pattern as tickets.
