@@ -240,3 +240,10 @@ class FreshserviceClient:
     def get_project_memberships(self, project_id: int) -> list:
         """Return all memberships for a project (users + access_type + manage_settings + project_manager flags)."""
         return self._paginate(f"pm/projects/{project_id}/memberships", "memberships")
+
+    def get_project_tickets(self, project_id: int) -> list:
+        """Return tickets associated to a project. Each object carries `id` = ticket id;
+        there is no separate association id. The relationship is many-to-many — there is
+        no inverse ('projects for a ticket') endpoint, so the only way to build the junction
+        is to iterate every project's tickets."""
+        return self._paginate(f"pm/projects/{project_id}/tickets", "tickets")

@@ -141,6 +141,7 @@ All ID and foreign key columns use `BIGINT` — Freshservice IDs exceed SQL Serv
 | `projects` | `id BIGINT` | NewGen projects (`pm/` namespace). Full reload every run. In the main replicator, not a standalone script — projects see growing use and need regular re-sync. |
 | `project_tasks` | `id BIGINT` | FK → `projects(id)`. DELETE+re-INSERT per project each run. |
 | `project_members` | `id BIGINT` | FK → `projects(id)`. DELETE+re-INSERT per project each run. |
+| `project_tickets` | `(project_id, ticket_id)` | Ticket ↔ project association (many-to-many: a project has many tickets, a ticket can be on many projects). FK → `projects(id)` only — **no FK to tickets** (a project can reference a ticket deleted/absent from the replica, which would block the insert). Composite PK, no surrogate id (API carries no association id). Built by iterating `GET /pm/projects/{id}/tickets` (no inverse 'projects for a ticket' endpoint exists). DELETE+re-INSERT per project each run. Index on `ticket_id` for reverse lookup. |
 
 Indexes on `tickets`: `updated_at`, `status`, `requester_id`, `responder_id`.
 
@@ -301,7 +302,7 @@ Freshservice enforces API rate limits. When hit (HTTP 429), the code reads `Retr
 | Workload fields (planned_*) | Captured by `workload_sync.py` into `ticket_workload` table — separate process, own schedule |
 | Conversations / Tasks / Time Entries / Activities | Re-fetched for tickets that appeared in the ticket sync window |
 | Problems / Changes / Releases | `updated_since` watermark — same pattern as tickets |
-| Agents / Requesters / Groups / Departments / Locations / SLA policies / Roles / Projects | Full reload every run (no `updated_since` filter, small datasets, ~30s overhead). Adds separate `sync_log` entries for `agent_group_members` and `requester_group_members`. Projects also re-sync `project_tasks` and `project_members` per run. |
+| Agents / Requesters / Groups / Departments / Locations / SLA policies / Roles / Projects | Full reload every run (no `updated_since` filter, small datasets, ~30s overhead). Adds separate `sync_log` entries for `agent_group_members` and `requester_group_members`. Projects also re-sync `project_tasks`, `project_members`, and `project_tickets` per run. |
 
 ---
 

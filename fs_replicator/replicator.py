@@ -93,7 +93,7 @@ def main():
         if args.reset:
             log.info("Dropping all tables...")
             drop_order = [
-                "project_tasks", "project_members", "projects",
+                "project_tickets", "project_tasks", "project_members", "projects",
                 "release_time_entries", "release_tasks", "release_conversations", "releases",
                 "change_time_entries", "change_tasks", "change_conversations", "changes",
                 "problem_time_entries", "problem_tasks", "problem_conversations", "problems",
@@ -122,7 +122,7 @@ def main():
             "problem_conversations", "problem_tasks", "problem_time_entries",
             "change_conversations", "change_tasks", "change_time_entries",
             "release_conversations", "release_tasks", "release_time_entries",
-            "project_tasks", "project_members",
+            "project_tickets", "project_tasks", "project_members",
             "tickets", "problems", "changes", "releases", "projects",
             "agent_group_members", "agent_groups",
             "requester_group_members", "requester_groups",
@@ -514,6 +514,7 @@ def _run_sync_cycle(conn, client, args, db, syncers):
         for entity, fn in [
             ("project_tasks",   lambda: syncers.sync_project_tasks(conn, client, project_ids)),
             ("project_members", lambda: syncers.sync_project_members(conn, client, project_ids)),
+            ("project_tickets", lambda: syncers.sync_project_tickets(conn, client, project_ids)),
         ]:
             try:
                 rows = fn()

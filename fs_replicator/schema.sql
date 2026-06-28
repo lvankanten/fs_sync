@@ -746,6 +746,26 @@ CREATE TABLE project_members (
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_project_members_project_id' AND object_id = OBJECT_ID('project_members'))
     CREATE INDEX IX_project_members_project_id ON project_members (project_id);
 
+-- Ticket ↔ project association (many-to-many). A project has many tickets and a
+-- ticket can belong to more than one project, so this is modeled as a junction,
+-- not a column on either table. Source: GET /api/v2/pm/projects/{id}/tickets
+-- (there is no inverse 'projects for a ticket' endpoint). Full reload per run:
+-- DELETE the project's rows, then re-INSERT (small cardinality). No surrogate id —
+-- composite PK is the natural key. No FK to tickets: a project can reference a
+-- ticket that is deleted or otherwise absent from the replica, which would block
+-- the insert; FK to projects is safe (parent synced immediately before).
+IF OBJECT_ID('project_tickets', 'U') IS NULL
+CREATE TABLE project_tickets (
+    project_id          BIGINT              NOT NULL,
+    ticket_id           BIGINT              NOT NULL,
+    replicated_at       DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    CONSTRAINT PK_project_tickets PRIMARY KEY (project_id, ticket_id),
+    CONSTRAINT FK_project_tickets_projects FOREIGN KEY (project_id) REFERENCES projects(id)
+);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_project_tickets_ticket_id' AND object_id = OBJECT_ID('project_tickets'))
+    CREATE INDEX IX_project_tickets_ticket_id ON project_tickets (ticket_id);
+
 -- Agent roles lookup. Resolves the role_id values embedded in agents.roles_json
 -- (which only carry role_id + assignment_scope) to human-readable names.
 -- Reference entity: small dataset, full reload every run. `default` is a SQL

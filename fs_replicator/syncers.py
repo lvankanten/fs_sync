@@ -1388,3 +1388,43 @@ def sync_project_members(conn, client: FreshserviceClient, project_ids: list[int
 
     log.info("Project members: %d rows upserted.", total)
     return total
+
+
+def sync_project_tickets(conn, client: FreshserviceClient, project_ids: list[int]) -> int:
+    """Re-fetch and replace the ticket↔project associations for all given project IDs.
+
+    Many-to-many junction: the API only exposes the relationship per-project
+    (GET /pm/projects/{id}/tickets) — there is no inverse endpoint — so the only
+    way to build it is to iterate every project. DELETE+re-INSERT per project,
+    same pattern as agent_group_members (composite key, no surrogate id)."""
+    if not project_ids:
+        return 0
+
+    log.info("Syncing project-ticket associations for %d projects...", len(project_ids))
+    cur = conn.cursor()
+    total = 0
+
+    for pid in project_ids:
+        try:
+            tickets = client.get_project_tickets(pid)
+        except Exception as e:
+            log.warning("  Could not fetch tickets for project %d: %s", pid, e)
+            continue
+
+        cur.execute("DELETE FROM project_tickets WHERE project_id = %s", pid)
+        conn.commit()
+
+        ticket_ids = [t.get("id") for t in tickets if t.get("id") is not None]
+        if not ticket_ids:
+            continue
+
+        cur.executemany(
+            "INSERT INTO project_tickets (project_id, ticket_id) VALUES (%s, %s)",
+            [(pid, tid) for tid in ticket_ids],
+        )
+        conn.commit()
+        total += len(ticket_ids)
+        time.sleep(0.1)  # gentle rate-limit cushion
+
+    log.info("Project tickets: %d associations upserted.", total)
+    return total
