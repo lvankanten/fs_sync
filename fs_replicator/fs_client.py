@@ -59,8 +59,14 @@ class FreshserviceClient:
         return self._paginate("tickets", "tickets", params, max_pages=max_pages)
 
     def get_ticket(self, ticket_id: int) -> dict:
-        """Fetch a single ticket (includes description_text and full custom_fields)."""
-        return self._get(f"tickets/{ticket_id}").get("ticket", {})
+        """Fetch a single ticket (includes description_text and full custom_fields).
+
+        include=related_tickets,assets adds the `related_tickets` object (parent_id /
+        child_ids / tracker, used for ticket associations) and the `assets` array
+        (ticket↔CI links). Verified 2026-06-29 that the include preserves the
+        detail-only fields (urgency/impact/resolution_notes) — it only adds keys.
+        """
+        return self._get(f"tickets/{ticket_id}", {"include": "related_tickets,assets"}).get("ticket", {})
 
     def get_ticket_fields(self) -> list:
         """Return all ticket field definitions (used for custom field discovery)."""
@@ -133,6 +139,13 @@ class FreshserviceClient:
     def get_sla_policies(self) -> list:
         """Return all SLA policies. Small dataset — full reload per run."""
         return self._paginate("sla_policies", "sla_policies")
+
+    # ── business hours ────────────────────────────────────────────────────────
+
+    def get_business_hours(self) -> list:
+        """Return all business-hours / service-desk calendars. Small dataset
+        (1 at JES) — full reload per run."""
+        return self._paginate("business_hours", "business_hours")
 
     # ── roles ─────────────────────────────────────────────────────────────────
 

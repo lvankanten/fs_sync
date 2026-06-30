@@ -783,3 +783,107 @@ CREATE TABLE roles (
     replicated_at   DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
     CONSTRAINT PK_roles PRIMARY KEY (id)
 );
+
+-- ─── Ticket associations (parent / child / tracker / related) ─────────────────
+-- Source: GET /api/v2/tickets/{id}?include=related_tickets  (detail-only; the
+-- list endpoint 400s this include and the filter API does not support it). The
+-- API returns a `related_tickets` object whose shape depends on the ticket's
+-- role in the relationship — verified live 2026-06-29:
+--   child  ticket -> {"parent_id": 44800}
+--   parent ticket -> {"child_ids": [44807], "child_tickets_details": [{...}]}
+-- `association_type` / `associated_tickets_list` exist as top-level fields but are
+-- always null at JES (legacy/other-edition), so the real signal is related_tickets.
+-- Modeled as a junction for the §4.4 reverse-lookup signal. relation ∈
+-- {parent, child, tracker, related, ...} (derived from the related_tickets key).
+-- No FK on related_ticket_id (it may reference a ticket absent from the replica);
+-- FK on ticket_id is safe (the owning ticket is upserted in the same run).
+-- Captured during the existing fetch_details detail GET in sync_tickets (no extra
+-- API calls); DELETE+re-INSERT per touched ticket. Skipped on --full/--test (no detail).
+IF OBJECT_ID('ticket_associations', 'U') IS NULL
+CREATE TABLE ticket_associations (
+    ticket_id           BIGINT              NOT NULL,
+    related_ticket_id   BIGINT              NOT NULL,
+    relation            NVARCHAR(20)        NOT NULL,
+    replicated_at       DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    CONSTRAINT PK_ticket_associations PRIMARY KEY (ticket_id, related_ticket_id, relation),
+    CONSTRAINT FK_ticket_associations_tickets FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_ticket_associations_related' AND object_id = OBJECT_ID('ticket_associations'))
+    CREATE INDEX IX_ticket_associations_related ON ticket_associations (related_ticket_id);
+
+-- ─── Ticket ↔ asset / CI links ────────────────────────────────────────────────
+-- Source: GET /api/v2/tickets/{id}?include=assets  (the /tickets/{id}/assets
+-- sub-endpoint 404s on this plan). Verified live 2026-06-29 that the include is
+-- valid and returns assets:[] — but JES has ZERO ticket↔asset links today (assets
+-- were just onboarded via Discovery Agent 2026-06-25), so the populated entry
+-- shape could NOT be verified from a live GET. Defensive design: store the two
+-- stable ids confirmed on GET /assets (id + display_id) plus the full raw entry
+-- as JSON so nothing is lost or mis-typed if the embedded shape differs. Surrogate
+-- IDENTITY PK (like ticket_activities) since a stable per-link key isn't guaranteed.
+-- DELETE+re-INSERT per touched ticket. ⚠ asset_id/asset_display_id key extraction
+-- is UNVERIFIED until a real link exists — revisit then (Les, 2026-06-29).
+IF OBJECT_ID('ticket_assets', 'U') IS NULL
+CREATE TABLE ticket_assets (
+    id                  BIGINT              IDENTITY(1,1) NOT NULL,
+    ticket_id           BIGINT              NOT NULL,
+    asset_id            BIGINT              NULL,
+    asset_display_id    BIGINT              NULL,
+    asset_name          NVARCHAR(500)       NULL,
+    asset_json          NVARCHAR(MAX)       NULL,
+    replicated_at       DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    CONSTRAINT PK_ticket_assets PRIMARY KEY (id),
+    CONSTRAINT FK_ticket_assets_tickets FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_ticket_assets_ticket_id' AND object_id = OBJECT_ID('ticket_assets'))
+    CREATE INDEX IX_ticket_assets_ticket_id ON ticket_assets (ticket_id);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_ticket_assets_asset_display_id' AND object_id = OBJECT_ID('ticket_assets'))
+    CREATE INDEX IX_ticket_assets_asset_display_id ON ticket_assets (asset_display_id);
+
+-- ─── Category definitions / hierarchy (flattened 3-level tree) ────────────────
+-- Source: ticket_form_fields -> the `category` field (field_type=default_category),
+-- whose `choices` is a tree of {id, display_id, value, nested_options:[...]}.
+-- Verified live 2026-06-29: 70 categories, levels named by nested_fields:
+--   level 1 = category, level 2 = sub_category, level 3 = item_category.
+-- Flattened so each row fully describes its position (level + parent_id + the
+-- denormalized path values) for easy joins to tickets.category/sub_category/
+-- item_category and the SLA Category×Type work. Reference entity: full replace
+-- (DELETE+INSERT) every run so the FSUI category restructure can't leave stale rows.
+IF OBJECT_ID('categories', 'U') IS NULL
+CREATE TABLE categories (
+    id                      BIGINT              NOT NULL,
+    display_id              INT                 NULL,
+    value                   NVARCHAR(500)       NULL,
+    level                   SMALLINT            NULL,
+    parent_id               BIGINT              NULL,
+    category_value          NVARCHAR(500)       NULL,
+    sub_category_value      NVARCHAR(500)       NULL,
+    item_category_value     NVARCHAR(500)       NULL,
+    replicated_at           DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    CONSTRAINT PK_categories PRIMARY KEY (id)
+);
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_categories_parent_id' AND object_id = OBJECT_ID('categories'))
+    CREATE INDEX IX_categories_parent_id ON categories (parent_id);
+
+-- ─── Business hours / service-desk calendars ──────────────────────────────────
+-- Source: GET /api/v2/business_hours. Verified live 2026-06-29 (1 calendar at JES).
+-- Header columns + nested service_desk_hours (per-weekday dict) and list_of_holidays
+-- (array) as JSON blobs — same pattern as sla_policies. Reference entity, full reload.
+IF OBJECT_ID('business_hours', 'U') IS NULL
+CREATE TABLE business_hours (
+    id                      BIGINT              NOT NULL,
+    name                    NVARCHAR(200)       NULL,
+    description             NVARCHAR(MAX)       NULL,
+    is_default              BIT                 NULL,
+    time_zone               NVARCHAR(100)       NULL,
+    service_desk_hours_json NVARCHAR(MAX)       NULL,
+    list_of_holidays_json   NVARCHAR(MAX)       NULL,
+    workspace_id            BIGINT              NULL,
+    created_at              DATETIMEOFFSET(0)   NULL,
+    updated_at              DATETIMEOFFSET(0)   NULL,
+    replicated_at           DATETIMEOFFSET(0)   NOT NULL DEFAULT SYSDATETIMEOFFSET(),
+    CONSTRAINT PK_business_hours PRIMARY KEY (id)
+);

@@ -142,6 +142,10 @@ All ID and foreign key columns use `BIGINT` — Freshservice IDs exceed SQL Serv
 | `project_tasks` | `id BIGINT` | FK → `projects(id)`. DELETE+re-INSERT per project each run. |
 | `project_members` | `id BIGINT` | FK → `projects(id)`. DELETE+re-INSERT per project each run. |
 | `project_tickets` | `(project_id, ticket_id)` | Ticket ↔ project association (many-to-many: a project has many tickets, a ticket can be on many projects). FK → `projects(id)` only — **no FK to tickets** (a project can reference a ticket deleted/absent from the replica, which would block the insert). Composite PK, no surrogate id (API carries no association id). Built by iterating `GET /pm/projects/{id}/tickets` (no inverse 'projects for a ticket' endpoint exists). DELETE+re-INSERT per project each run. Index on `ticket_id` for reverse lookup. |
+| `ticket_associations` | `(ticket_id, related_ticket_id, relation)` | Ticket↔ticket links (parent/child/tracker/related). Source: `GET /tickets/{id}?include=related_tickets` — **detail-only** (list endpoint 400s the include), captured during the existing `fetch_details` GET in `sync_tickets` (no extra API calls). The API `related_tickets` object shape is role-dependent: child→`{parent_id}`, parent→`{child_ids:[…], child_tickets_details:[…]}`. `relation` is derived generically from the key (`parent_id`→parent, `child_ids`→child, `tracker_id`→tracker), so tracker/related are handled without code changes. `association_type`/`associated_tickets_list` exist but are always null at JES. FK on `ticket_id` only (`related_ticket_id` may be absent from the replica). Index on `related_ticket_id` for reverse lookup. DELETE+re-INSERT per fetched ticket. Skipped on `--full`/`--test` (no detail). |
+| `ticket_assets` | `id BIGINT IDENTITY` | Ticket↔asset/CI links. Source: `GET /tickets/{id}?include=assets` (the `/tickets/{id}/assets` sub-endpoint 404s), captured in the same detail GET as associations. ⚠ **Populated entry shape UNVERIFIED** — JES had zero ticket↔asset links at build time (assets onboarded 2026-06-25), so the capture is defensive: stores `asset_id` + `asset_display_id` + `asset_name` when the entry is a dict, plus the full raw entry as `asset_json` so nothing is lost. Surrogate IDENTITY PK (no guaranteed per-link key). FK on `ticket_id`. DELETE+re-INSERT per fetched ticket. Revisit field extraction once real links exist. |
+| `categories` | `id BIGINT` | Category definitions/hierarchy (the *tree*, vs the per-ticket category *values* on `tickets`). Source: `ticket_form_fields` → the `category` field (`field_type=default_category`) `choices` tree. Flattened: one row per node with `level` (1=category, 2=sub_category, 3=item_category), `parent_id`, and denormalized path columns `category_value`/`sub_category_value`/`item_category_value` for easy joins. Reference entity — **full replace** (`DELETE`+`INSERT`) every run so the FSUI category restructure can't leave stale rows. Index on `parent_id`. |
+| `business_hours` | `id BIGINT` | Service-desk calendars. Source: `GET /business_hours`. Header columns + nested `service_desk_hours` (per-weekday dict) and `list_of_holidays` (array) stored as JSON blobs — same pattern as `sla_policies`. Full reload every run (reference entity). |
 
 Indexes on `tickets`: `updated_at`, `status`, `requester_id`, `responder_id`.
 
@@ -217,11 +221,14 @@ Indexes on `tickets`: `updated_at`, `status`, `requester_id`, `responder_id`.
 - `sync_departments` / `sync_locations` — full reload every run.
 - `sync_problems` / `sync_changes` / `sync_releases` — incremental via `updated_since`. Same detail-only field pattern as tickets.
 - Generic helpers: `_sync_conversations_for`, `_sync_tasks_for`, `_sync_time_entries_for` — detect 404 on first call and skip the entire batch with a single warning.
+- `_sync_ticket_associations` / `_sync_ticket_assets` — called from `sync_tickets` after the ticket upsert, using the `related_tickets` / `assets` blobs captured during the detail GET (no extra API calls). DELETE+re-INSERT per fetched ticket; only ticket IDs whose detail GET succeeded are recorded (a failed GET never deletes existing junction rows). `sync_tickets` now returns a 5-tuple `(row_count, ticket_ids, run_start, assoc_count, asset_count)`.
+- `sync_categories` — full-replace reference entity: reads the `category` field tree from `get_ticket_fields()` and flattens it (recursive walk over `nested_options`).
+- `sync_business_hours` — full-reload reference entity (`GET /business_hours`), JSON-blob pattern like `sync_sla_policies`.
 
 ### `replicator.py`
 Sync order respects FK constraints:
 - `--full` / `--test`: agents → requesters → groups → departments → locations → tickets → problems → changes → releases (+ sub-entities)
-- Incremental: agents → requesters → groups → departments → locations → tickets → conversations/tasks/time entries/activities → problems → changes → releases (+ sub-entities) → projects → **deleted-ticket reconciliation**. Reference entities are full-reloaded every run (small datasets, ~30s overhead). Workload fields (planned_*) handled separately by `workload_sync.py`.
+- Incremental: agents → requesters → groups → departments → locations → sla_policies → roles → **categories** → **business_hours** → tickets (+ **associations/assets** captured from the ticket detail GET) → conversations/tasks/time entries/activities → problems → changes → releases (+ sub-entities) → projects → **deleted-ticket reconciliation**. Reference entities are full-reloaded every run (small datasets, ~30s overhead). Workload fields (planned_*) handled separately by `workload_sync.py`.
 
 Each entity: read watermark → sync → write sync_log. Failure logs an error and continues; watermark is NOT advanced on failure so the next run retries from the same point.
 
@@ -237,6 +244,10 @@ Each entity: read watermark → sync → write sync_log. Failure logs an error a
 |---|---|
 | `GET /api/v2/ticket_fields` | Returns 404 on this plan. Use `ticket_form_fields` instead. |
 | `GET /api/v2/tickets?include=description` | Returns 400 — not supported. |
+| Ticket associations (`related_tickets`) | Only via the **detail** GET with `?include=related_tickets`; the list endpoint **400s** this include and the filter API doesn't support `association_type`. The `related_tickets` object shape is role-dependent (child→`{parent_id}`, parent→`{child_ids, child_tickets_details}`). `association_type`/`associated_tickets_list` are top-level fields but **always null** at JES. Verified the include preserves the detail-only fields (urgency/impact). → `ticket_associations`. |
+| Ticket assets (`?include=assets`) | The `/tickets/{id}/assets` sub-endpoint **404s**; use `?include=assets` on the ticket detail. Returns `[]` for all sampled tickets — JES had **zero** ticket↔asset links at build time (assets onboarded via Discovery Agent 2026-06-25), so the populated entry shape is **unverified**; `ticket_assets` capture is defensive (raw JSON preserved). |
+| `GET /api/v2/assets` | Asset inventory. `id` is the large internal id; `display_id` is the human/URL id. Full asset replication (`assets_replicator.py`) is still Phase 2 — only the ticket↔asset junction is implemented so far. |
+| `GET /api/v2/business_hours` | Returns the service-desk calendars. `service_desk_hours` (per-weekday dict) and `list_of_holidays` (array) are nested objects → stored as JSON blobs. |
 | `GET /api/v2/tickets` (list endpoint) | Does NOT return `urgency`, `impact`, `planned_effort`, `planned_start_date`, `planned_end_date`, `resolution_notes`. These require individual ticket GETs. Also never returns deleted (trashed) tickets — those must be fetched via `?filter=deleted` separately. See "Deleted tickets" below. |
 | Deleted tickets | The main list endpoint excludes deleted (trashed) tickets entirely. Without intervention they linger in the replica as phantoms — frozen at pre-deletion state, often appearing "open" with stale department references. Fix: post-sync reconciliation pass (`syncers.reconcile_deleted_tickets`) that pages `GET /api/v2/tickets?filter=deleted` and **hard-DELETEs** matches from `tickets` + their FK children (`conversations`, `ticket_tasks`, `ticket_time_entries`, `ticket_activities`, `ticket_workload`). Runs every cycle. **No `deleted` column** — keeps the replica clean at the source so consumers don't need an `AND deleted=0` filter that can be forgotten (Les, 2026-06-20). If a ticket is restored in FS, normal upsert re-inserts it. The signature of a deleted ticket from the API: GET works (returns it with `deleted=true`), PUT returns 405 "method not allowed". |
 | Workload Management fields (`planned_effort`, `planned_start_date`, `planned_end_date`) | Updating these fields does **not** bump `updated_at` on the ticket. This means the `updated_since` filter will not pick up changes to these fields unless another field on the ticket also changes. **Captured by `workload_sync.py` (separate script)** writing to the `ticket_workload` table — runs on its own schedule, not part of `replicator.py`. |
@@ -301,8 +312,9 @@ Freshservice enforces API rate limits. When hit (HTTP 429), the code reads `Retr
 | Tickets | `updated_since` watermark — only changed tickets fetched via list endpoint |
 | Workload fields (planned_*) | Captured by `workload_sync.py` into `ticket_workload` table — separate process, own schedule |
 | Conversations / Tasks / Time Entries / Activities | Re-fetched for tickets that appeared in the ticket sync window |
+| Associations / Asset links | Captured from the ticket detail GET (`include=related_tickets,assets`) for tickets in the sync window — DELETE+re-INSERT per ticket. Skipped on `--full`/`--test` (no detail). |
 | Problems / Changes / Releases | `updated_since` watermark — same pattern as tickets |
-| Agents / Requesters / Groups / Departments / Locations / SLA policies / Roles / Projects | Full reload every run (no `updated_since` filter, small datasets, ~30s overhead). Adds separate `sync_log` entries for `agent_group_members` and `requester_group_members`. Projects also re-sync `project_tasks`, `project_members`, and `project_tickets` per run. |
+| Agents / Requesters / Groups / Departments / Locations / SLA policies / Roles / Categories / Business hours / Projects | Full reload every run (no `updated_since` filter, small datasets, ~30s overhead). Adds separate `sync_log` entries for `agent_group_members` and `requester_group_members`. `categories` is a full *replace* (DELETE+INSERT). Projects also re-sync `project_tasks`, `project_members`, and `project_tickets` per run. |
 
 ---
 
@@ -312,8 +324,10 @@ Phase 1 is complete. Implement Phase 2 in this order:
 
 Projects and SLA policies are done — both folded into the main `replicator.py` (not standalone scripts) because they change over time and need regular re-syncing. Remaining Phase 2 work:
 
+**Replica-first gap fill (FS #41430, 2026-06-29) — done, all in the main `replicator.py`:** ticket associations (`ticket_associations`), ticket category tree (`categories`), business-hours calendars (`business_hours`), and the ticket↔asset junction (`ticket_assets`, capture defensive/partial — see its table note). These plug the API-only reads that Brain2's replica-first rule needs. The **full** asset inventory (`assets_replicator.py`) and **service-catalog** categories/items (`catalog_replicator.py`) remain Phase 2 — note `categories` here is the *ticket* category tree, distinct from service-catalog categories.
+
 ### Phase 2 — new replicators
-1. `assets_replicator.py` — assets (incremental), relationships, components
+1. `assets_replicator.py` — assets (incremental), relationships, components (the ticket↔asset *junction* is done; full inventory is not)
 2. `catalog_replicator.py` — service catalog categories + items
 3. `kb_replicator.py` — solution categories, folders, published articles
 4. `config_replicator.py` — canned responses, announcements

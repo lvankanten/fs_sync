@@ -316,14 +316,19 @@ def sync_tickets(
     last_synced_at: datetime | None,
     fetch_details: bool = True,
     limit: int = None,
-) -> tuple[int, list[int], datetime]:
+) -> tuple[int, list[int], datetime, int, int]:
     """
-    Returns (row_count, touched_ticket_ids, run_start).
+    Returns (row_count, touched_ticket_ids, run_start, assoc_count, asset_count).
     run_start is recorded before the first API call — use as the next watermark.
 
     fetch_details=False skips individual ticket GETs (used for full load).
     description_text will be NULL but all other fields are populated from the list endpoint.
     Incremental runs use fetch_details=True so descriptions fill in as tickets are updated.
+
+    Ticket associations (related_tickets) and asset links (assets) ride the detail
+    GET — they are captured here (no extra API calls) and written to ticket_associations
+    / ticket_assets via DELETE+re-INSERT per fetched ticket. On --full/--test
+    (fetch_details=False) no detail is fetched, so existing junction rows are left intact.
 
     limit truncates the ticket list (used by --test mode).
     """
@@ -363,6 +368,10 @@ def sync_tickets(
 
     rows = []
     ticket_ids = []
+    # Only record into these for tickets whose detail GET actually succeeded, so a
+    # failed GET never DELETEs existing junction rows (we can't tell empty from failed).
+    assoc_map: dict[int, dict] = {}
+    asset_map: dict[int, list] = {}
 
     for i, t in enumerate(tickets_list):
         tid = t.get("id")
@@ -371,6 +380,8 @@ def sync_tickets(
         if fetch_details:
             try:
                 detail = client.get_ticket(tid)
+                assoc_map[tid] = detail.get("related_tickets") or {}
+                asset_map[tid] = detail.get("assets") or []
                 time.sleep(1)
             except Exception as e:
                 log.warning("  Could not fetch detail for ticket %d: %s", tid, e)
@@ -387,7 +398,92 @@ def sync_tickets(
         log.info("  Written %d / %d tickets to SQL...", min(total, len(rows)), len(rows))
 
     log.info("Tickets: %d rows upserted.", total)
-    return total, ticket_ids, run_start
+
+    # Associations + asset links come from the detail GETs already done above.
+    assoc_count = _sync_ticket_associations(conn, assoc_map)
+    asset_count = _sync_ticket_assets(conn, asset_map)
+
+    return total, ticket_ids, run_start, assoc_count, asset_count
+
+
+# ── ticket associations & asset links (captured from the detail GET) ───────────
+
+def _sync_ticket_associations(conn, assoc_map: dict[int, dict]) -> int:
+    """DELETE+re-INSERT ticket_associations for each ticket whose detail was fetched.
+
+    `related_tickets` shapes (verified live 2026-06-29):
+      child  -> {"parent_id": <id>}
+      parent -> {"child_ids": [<id>...], "child_tickets_details": [...]}
+    The relation name is derived generically from the key (parent_id->parent,
+    child_ids->child, tracker_id->tracker), so tracker/related links — none present
+    at JES today — are handled without code changes. child_tickets_details is the
+    denormalized echo of child_ids and is skipped.
+    """
+    if not assoc_map:
+        return 0
+    cur = conn.cursor()
+    total = 0
+    for tid, rel in assoc_map.items():
+        cur.execute("DELETE FROM ticket_associations WHERE ticket_id = %s", tid)
+        conn.commit()
+        seen = set()
+        for key, val in (rel or {}).items():
+            if key == "child_tickets_details":
+                continue
+            if key.endswith("_ids"):
+                relation = key[:-4]
+            elif key.endswith("_id"):
+                relation = key[:-3]
+            else:
+                relation = key
+            ids = val if isinstance(val, list) else [val]
+            for rid in ids:
+                if isinstance(rid, int) and rid != tid:
+                    seen.add((tid, rid, relation[:20]))
+        if seen:
+            cur.executemany(
+                "INSERT INTO ticket_associations (ticket_id, related_ticket_id, relation) VALUES (%s, %s, %s)",
+                list(seen),
+            )
+            conn.commit()
+            total += len(seen)
+    log.info("Ticket associations: %d rows for %d ticket(s).", total, len(assoc_map))
+    return total
+
+
+def _sync_ticket_assets(conn, asset_map: dict[int, list]) -> int:
+    """DELETE+re-INSERT ticket_assets for each ticket whose detail was fetched.
+
+    ⚠ The embedded asset entry shape is UNVERIFIED — JES has zero ticket↔asset links
+    today (assets onboarded 2026-06-25). Defensive: pull the two ids confirmed on
+    GET /assets (id + display_id) and name when the entry is a dict, tolerate a bare
+    id, and always preserve the full raw entry as JSON so nothing is lost.
+    """
+    if not asset_map:
+        return 0
+    cur = conn.cursor()
+    total = 0
+    for tid, assets in asset_map.items():
+        cur.execute("DELETE FROM ticket_assets WHERE ticket_id = %s", tid)
+        conn.commit()
+        out = []
+        for a in (assets or []):
+            if isinstance(a, dict):
+                out.append((tid, a.get("id"), a.get("display_id"), a.get("name"), json.dumps(a)))
+            elif isinstance(a, int):
+                out.append((tid, a, None, None, json.dumps(a)))
+            else:
+                out.append((tid, None, None, None, json.dumps(a)))
+        if out:
+            cur.executemany(
+                "INSERT INTO ticket_assets (ticket_id, asset_id, asset_display_id, asset_name, asset_json) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                out,
+            )
+            conn.commit()
+            total += len(out)
+    log.info("Ticket assets: %d link(s) for %d ticket(s).", total, len(asset_map))
+    return total
 
 
 # ── conversations ─────────────────────────────────────────────────────────────
@@ -675,6 +771,8 @@ def reconcile_deleted_tickets(conn, client: FreshserviceClient) -> int:
         "ticket_tasks",
         "conversations",
         "ticket_workload",
+        "ticket_associations",
+        "ticket_assets",
     )
     cur = conn.cursor()
     deleted_rows = 0
@@ -959,6 +1057,85 @@ def sync_roles(conn, client: FreshserviceClient) -> int:
     for i in range(0, len(rows), _BATCH):
         total += db.merge_rows(conn, "roles", "id", rows[i:i + _BATCH])
     log.info("Roles: %d rows upserted.", total)
+    return total
+
+
+# ── categories (definitions / hierarchy) ──────────────────────────────────────
+
+def sync_categories(conn, client: FreshserviceClient) -> int:
+    """Full-replace the category tree from the ticket `category` form field.
+
+    Source: ticket_form_fields -> the default_category field's `choices` tree
+    (id/display_id/value/nested_options). Flattened to one row per node with its
+    level (1=category, 2=sub_category, 3=item_category), parent_id, and the
+    denormalized path values. DELETE+INSERT every run so the FSUI category
+    restructure can't leave stale rows behind.
+    """
+    log.info("Syncing categories...")
+    fields = client.get_ticket_fields()
+    cat_field = next(
+        (f for f in fields
+         if f.get("field_type") == "default_category" or f.get("name") == "category"),
+        None,
+    )
+    if not cat_field:
+        log.warning("  No category field found in ticket_form_fields — skipping categories.")
+        return 0
+
+    rows = []
+
+    def walk(nodes, level, parent_id, cat_v, sub_v):
+        for n in nodes:
+            v = n.get("value")
+            cv = v if level == 1 else cat_v
+            sv = v if level == 2 else sub_v
+            iv = v if level == 3 else None
+            rows.append((
+                n.get("id"), n.get("display_id"), v, level, parent_id,
+                cv, (sv if level >= 2 else None), iv,
+            ))
+            walk(n.get("nested_options") or [], level + 1, n.get("id"), cv, sv)
+
+    walk(cat_field.get("choices") or [], 1, None, None, None)
+
+    cur = conn.cursor()
+    cur.execute("DELETE FROM categories")
+    conn.commit()
+    if rows:
+        cur.executemany(
+            "INSERT INTO categories "
+            "(id, display_id, value, level, parent_id, category_value, sub_category_value, item_category_value) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            rows,
+        )
+        conn.commit()
+    log.info("Categories: %d rows (full replace).", len(rows))
+    return len(rows)
+
+
+# ── business hours ─────────────────────────────────────────────────────────────
+
+def sync_business_hours(conn, client: FreshserviceClient) -> int:
+    log.info("Syncing business hours...")
+    raw = client.get_business_hours()
+    rows = []
+    for b in raw:
+        rows.append({
+            "id":                       b.get("id"),
+            "name":                     b.get("name"),
+            "description":              b.get("description"),
+            "is_default":               _bool_or_none(b.get("is_default")),
+            "time_zone":                b.get("time_zone"),
+            "service_desk_hours_json":  _json_or_none(b.get("service_desk_hours")),
+            "list_of_holidays_json":    _json_or_none(b.get("list_of_holidays")),
+            "workspace_id":             b.get("workspace_id"),
+            "created_at":               _parse_dt(b.get("created_at")),
+            "updated_at":               _parse_dt(b.get("updated_at")),
+        })
+    total = 0
+    for i in range(0, len(rows), _BATCH):
+        total += db.merge_rows(conn, "business_hours", "id", rows[i:i + _BATCH])
+    log.info("Business hours: %d rows upserted.", total)
     return total
 
 

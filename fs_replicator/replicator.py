@@ -97,10 +97,12 @@ def main():
                 "release_time_entries", "release_tasks", "release_conversations", "releases",
                 "change_time_entries", "change_tasks", "change_conversations", "changes",
                 "problem_time_entries", "problem_tasks", "problem_conversations", "problems",
+                "ticket_associations", "ticket_assets",
                 "ticket_activities", "ticket_time_entries", "ticket_tasks", "conversations", "tickets",
                 "agent_group_members", "agent_groups",
                 "requester_group_members", "requester_groups",
-                "agents", "requesters", "departments", "locations", "sla_policies", "roles", "sync_log",
+                "agents", "requesters", "departments", "locations", "sla_policies", "roles",
+                "categories", "business_hours", "sync_log",
             ]
             cur = conn.cursor()
             for table in drop_order:
@@ -119,6 +121,7 @@ def main():
     if args.truncate:
         truncate_order = [
             "conversations", "ticket_tasks", "ticket_time_entries", "ticket_activities",
+            "ticket_associations", "ticket_assets",
             "problem_conversations", "problem_tasks", "problem_time_entries",
             "change_conversations", "change_tasks", "change_time_entries",
             "release_conversations", "release_tasks", "release_time_entries",
@@ -126,7 +129,8 @@ def main():
             "tickets", "problems", "changes", "releases", "projects",
             "agent_group_members", "agent_groups",
             "requester_group_members", "requester_groups",
-            "agents", "requesters", "departments", "locations", "sla_policies", "roles", "sync_log",
+            "agents", "requesters", "departments", "locations", "sla_policies", "roles",
+            "categories", "business_hours", "sync_log",
         ]
         log.info("Truncating all tables (schema preserved)...")
         cur = conn.cursor()
@@ -331,6 +335,8 @@ def _run_sync_cycle(conn, client, args, db, syncers):
         ("locations",        lambda: syncers.sync_locations(conn, client)),
         ("sla_policies",     lambda: syncers.sync_sla_policies(conn, client)),
         ("roles",            lambda: syncers.sync_roles(conn, client)),
+        ("categories",       lambda: syncers.sync_categories(conn, client)),
+        ("business_hours",   lambda: syncers.sync_business_hours(conn, client)),
     ]
 
     errors = []
@@ -358,12 +364,17 @@ def _run_sync_cycle(conn, client, args, db, syncers):
     # ── tickets ───────────────────────────────────────────────────────────────
     try:
         last_tickets = None if (args.full or args.test) else db.get_last_synced_at(conn, "tickets")
-        rows, ticket_ids, run_start = syncers.sync_tickets(
+        rows, ticket_ids, run_start, assoc_count, asset_count = syncers.sync_tickets(
             conn, client, last_tickets,
             fetch_details=not (args.full or args.test),
             limit=300 if args.test else None,
         )
         db.write_sync_log(conn, "tickets", "success", rows, last_synced_at=run_start)
+        # Associations + asset links are captured inside sync_tickets (from the detail
+        # GET). They only run when details are fetched (incremental), not on --full/--test.
+        if not (args.full or args.test):
+            db.write_sync_log(conn, "ticket_associations", "success", assoc_count, last_synced_at=run_start)
+            db.write_sync_log(conn, "ticket_assets", "success", asset_count, last_synced_at=run_start)
     except Exception as e:
         log.error("tickets sync failed: %s", e)
         db.write_sync_log(conn, "tickets", "error", 0, error=str(e))
