@@ -1465,7 +1465,56 @@ def sync_projects(conn, client: FreshserviceClient) -> tuple[int, list[int]]:
     for i in range(0, len(rows), _BATCH):
         total += db.merge_rows(conn, "projects", "id", rows[i:i + _BATCH])
     log.info("Projects: %d rows upserted.", total)
+
+    # Reconcile deletions. merge_rows is additive-only (UPDATE-then-INSERT, no
+    # DELETE branch), so a project deleted in FS — e.g. by a destructive
+    # /fs-projectify --refresh that deletes+recreates — would otherwise linger
+    # in the replica forever, along with its project_tasks/members/tickets
+    # children (whose per-parent DELETE never fires for a parent no longer in
+    # the fetch). The full re-fetch above is a complete live list, so anything
+    # in the replica but not in it is dead and safe to prune (clean-at-source,
+    # same discipline as reconcile_deleted_tickets). Decision: Les, 2026-07-01.
+    _prune_dead_projects(conn, project_ids)
+
     return total, project_ids
+
+
+def _prune_dead_projects(conn, live_ids: list[int]) -> int:
+    """Delete replica projects (and their children) not present in the live FS list.
+
+    Guard: never prune on an empty/partial fetch — that would wipe the replica.
+    get_projects() raises on API error rather than returning [], but an empty
+    live list is still treated as "don't trust it" here. Children first (FK-safe
+    order): project_tasks, project_members, project_tickets, then projects.
+    """
+    if not live_ids:
+        log.info("  Skipping project prune: empty live list (guard against partial fetch).")
+        return 0
+
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM projects")
+    replica_ids = {r[0] for r in cur.fetchall()}
+    dead_ids = list(replica_ids - set(live_ids))
+    if not dead_ids:
+        cur.close()
+        log.info("  Project prune: 0 dead projects.")
+        return 0
+
+    log.info("  Pruning %d dead project(s): %s", len(dead_ids), dead_ids)
+    CHUNK = 500
+    for i in range(0, len(dead_ids), CHUNK):
+        chunk = dead_ids[i:i + CHUNK]
+        placeholders = ", ".join(["%s"] * len(chunk))
+        for table in ("project_tasks", "project_members", "project_tickets"):
+            cur.execute(
+                f"DELETE FROM {table} WHERE project_id IN ({placeholders})",
+                chunk,
+            )
+        cur.execute(f"DELETE FROM projects WHERE id IN ({placeholders})", chunk)
+        conn.commit()
+    cur.close()
+    log.info("  Project prune: %d dead project(s) removed.", len(dead_ids))
+    return len(dead_ids)
 
 
 def sync_project_tasks(conn, client: FreshserviceClient, project_ids: list[int]) -> int:
