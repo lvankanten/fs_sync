@@ -278,6 +278,7 @@ def _map_ticket(ticket: dict, detail: dict, cf_map: dict) -> dict:
         "responder_id":         t.get("responder_id"),
         "group_id":             t.get("group_id"),
         "requester_id":         t.get("requester_id"),
+        "requested_for_id":     t.get("requested_for_id"),
         "workspace_id":         t.get("workspace_id"),
         "fr_escalated":         bool(t["fr_escalated"]) if t.get("fr_escalated") is not None else None,
         "is_escalated":         bool(t["is_escalated"]) if t.get("is_escalated") is not None else None,

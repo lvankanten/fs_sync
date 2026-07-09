@@ -142,6 +142,7 @@ CREATE TABLE tickets (
     responder_id        BIGINT              NULL,
     group_id            BIGINT              NULL,
     requester_id        BIGINT              NULL,
+    requested_for_id    BIGINT              NULL,
     workspace_id        BIGINT              NULL,
     fr_escalated        BIT                 NULL,
     is_escalated        BIT                 NULL,
@@ -165,6 +166,15 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_tickets_status' AND ob
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_tickets_requester_id' AND object_id = OBJECT_ID('tickets'))
     CREATE INDEX IX_tickets_requester_id ON tickets (requester_id);
+
+-- Ticket raised on behalf of another user. Natively returned by the ticket list
+-- endpoint (self-referencing = requester_id when not on-behalf). Added so dept
+-- heads can see tickets raised for their people in the Tickets v4 report (FS #41430).
+IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'tickets' AND COLUMN_NAME = 'requested_for_id')
+    ALTER TABLE tickets ADD requested_for_id BIGINT NULL
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_tickets_requested_for_id' AND object_id = OBJECT_ID('tickets'))
+    CREATE INDEX IX_tickets_requested_for_id ON tickets (requested_for_id);
 
 IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_tickets_responder_id' AND object_id = OBJECT_ID('tickets'))
     CREATE INDEX IX_tickets_responder_id ON tickets (responder_id);

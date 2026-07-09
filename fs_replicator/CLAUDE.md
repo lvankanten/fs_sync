@@ -110,7 +110,7 @@ All ID and foreign key columns use `BIGINT` — Freshservice IDs exceed SQL Serv
 | Table | Key | Notes |
 |---|---|---|
 | `sync_log` | `entity` (PK) | Watermark per entity. `last_synced_at = NULL` triggers full load. `cursor_id BIGINT` for mid-entity backfill resume. `backfill_completed_at DATETIMEOFFSET` marks an entity as fully backfilled so a resumed backfill skips it. |
-| `tickets` | `id BIGINT` | All ticket fields + `custom_fields_json` (full JSON blob). `planned_effort NVARCHAR(50)` — Workload Management field. Multi-select custom fields stored as comma-joined strings. Tickets deleted in live FS are hard-deleted from the replica each cycle (see Known API Limitations) — no `deleted` flag, consumers don't need a filter. |
+| `tickets` | `id BIGINT` | All ticket fields + `custom_fields_json` (full JSON blob). `planned_effort NVARCHAR(50)` — Workload Management field. `requested_for_id BIGINT` — user a ticket was raised on behalf of; returned natively by the list endpoint (no `include`/extra GET), self-references `requester_id` when not on-behalf. Added for the Tickets v4 dept-head report (FS #41430); indexed `IX_tickets_requested_for_id`. Multi-select custom fields stored as comma-joined strings. Tickets deleted in live FS are hard-deleted from the replica each cycle (see Known API Limitations) — no `deleted` flag, consumers don't need a filter. |
 | `conversations` | `id BIGINT` | FK → `tickets(id)`. DELETE+re-INSERT per ticket on each sync. |
 | `ticket_tasks` | `id BIGINT` | FK → `tickets(id)`. Tasks assigned to agents on tickets. Includes `planned_start_date`, `planned_end_date`, `planned_effort`. |
 | `ticket_time_entries` | `id BIGINT` | FK → `tickets(id)`. Time logged by agents on tickets. |
