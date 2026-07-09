@@ -6,6 +6,10 @@ Usage:
   python replicator.py --once    # single incremental run, then exit
   python replicator.py --full    # force full reload of all entities
   python replicator.py --setup   # create tables in FS database, then exit
+  python replicator.py --reconcile-tickets   # one-shot: reconcile silent-write ticket fields, then exit
+
+The continuous loop also runs the ticket reconcile once per calendar day by default
+(disable with --no-daily-ticket-reconcile).
 """
 
 import argparse
@@ -77,6 +81,14 @@ def main():
     parser.add_argument("--backfill-sub-entities", action="store_true", help="Fetch conversations, tasks, and time entries for ALL tickets/problems/changes/releases in DB")
     parser.add_argument("--once",               action="store_true", help="Run a single incremental and exit (default is to loop continuously)")
     parser.add_argument("--interval-seconds",   type=int, default=300, help="Seconds to sleep between iterations when looping (default: 300)")
+    parser.add_argument("--reconcile-tickets",  action="store_true",
+                        help="One-shot: full pass over the ticket LIST endpoint to reconcile 'silent-write' "
+                             "fields (e.g. requested_for_id) that don't bump updated_at and so are invisible "
+                             "to the incremental updated_since filter, then exit. List-only (no per-ticket GETs, "
+                             "no sub-entities); does NOT touch the incremental 'tickets' watermark.")
+    parser.add_argument("--no-daily-ticket-reconcile", action="store_true",
+                        help="Disable the once-per-calendar-day ticket reconcile the continuous loop runs by "
+                             "default (see --reconcile-tickets for what it does).")
     args = parser.parse_args()
 
     cfg = load_env()
@@ -291,13 +303,24 @@ def main():
             log.info("Backfill complete. Elapsed: %dh %dm %ds.", hours, minutes, seconds)
         return
 
+    # ── one-shot ticket reconcile ─────────────────────────────────────────────
+    if args.reconcile_tickets:
+        _run_full_ticket_reconcile(conn, client, db, syncers)
+        conn.close()
+        return
+
     # ── single-shot or loop ───────────────────────────────────────────────────
     # Loop is the default. --once, --full, and --test all run a single cycle.
     should_loop = not (args.once or args.full or args.test)
     if should_loop:
+        daily_reconcile = not args.no_daily_ticket_reconcile
         log.info("Starting continuous incremental loop, interval=%ds. Press Ctrl-C to stop.", args.interval_seconds)
+        if daily_reconcile:
+            log.info("Daily full ticket reconcile: ON (first iteration + once per calendar day). "
+                     "Disable with --no-daily-ticket-reconcile.")
         conn.close()  # we'll open a fresh one per iteration
         iteration = 0
+        last_reconcile_date = None
         try:
             while True:
                 iteration += 1
@@ -305,6 +328,16 @@ def main():
                 c = db.get_conn(cfg["server"], cfg["database"], cfg["username"], cfg["password"])
                 try:
                     _run_sync_cycle(c, client, args, db, syncers)
+                    # 'Silent-write' fields (e.g. requested_for_id) don't bump updated_at, so the
+                    # incremental pass above never re-pulls them. Reconcile the whole ticket list
+                    # once per calendar day — and on the first iteration after a start/restart, which
+                    # (given the replicator is started manually each morning) lands a reconcile daily.
+                    # Runs AFTER the incremental so it can't disturb the watermark or sub-entity sync.
+                    if daily_reconcile:
+                        today = datetime.now(timezone.utc).date()
+                        if today != last_reconcile_date:
+                            _run_full_ticket_reconcile(c, client, db, syncers)
+                            last_reconcile_date = today
                 finally:
                     c.close()
                 log.info("Iteration %d complete. Sleeping %ds...", iteration, args.interval_seconds)
@@ -320,6 +353,33 @@ def main():
         sys.exit(1)
     else:
         log.info("All entities synced successfully.")
+
+
+def _run_full_ticket_reconcile(conn, client, db, syncers):
+    """Full pass over the ticket LIST endpoint to reconcile 'silent-write' fields — ones
+    the API can change WITHOUT bumping updated_at (e.g. requested_for_id), which are
+    therefore invisible to the incremental updated_since filter and would otherwise stay
+    stale in the replica indefinitely.
+
+    List-only (fetch_details=False), exactly like the --full ticket step: no per-ticket
+    GETs, no sub-entities, no association/asset capture, and the detail-only columns
+    (urgency/impact/resolution_notes) are preserved (excluded from the write). Crucially it
+    does NOT advance the incremental 'tickets' watermark — it records its own
+    'tickets_full_reconcile' sync_log entry — so it can run right after the normal
+    incremental without disturbing sub-entity sync or the watermark. Returns rows refreshed.
+    """
+    log.info("Full ticket reconcile (list endpoint, no detail — catches silent-write fields)...")
+    try:
+        rows, _ids, run_start, _assoc, _asset = syncers.sync_tickets(
+            conn, client, None, fetch_details=False, limit=None,
+        )
+        db.write_sync_log(conn, "tickets_full_reconcile", "success", rows, last_synced_at=run_start)
+        log.info("Full ticket reconcile: %d rows refreshed.", rows)
+        return rows
+    except Exception as e:
+        log.error("Full ticket reconcile failed: %s", e)
+        db.write_sync_log(conn, "tickets_full_reconcile", "error", 0, error=str(e))
+        return 0
 
 
 def _run_sync_cycle(conn, client, args, db, syncers):

@@ -52,6 +52,8 @@ python replicator.py --once                    # single incremental run (changes
 python replicator.py --interval-seconds 60     # loop with custom interval (e.g., 60s)
 python replicator.py --test                    # smoke test: 300 newest tickets/problems/changes/releases
 python replicator.py --backfill-sub-entities   # fetch conversations/tasks/time entries for ALL records in DB
+python replicator.py --reconcile-tickets       # one-shot: reconcile silent-write ticket fields (e.g. requested_for_id), then exit
+python replicator.py --no-daily-ticket-reconcile   # loop, but skip the built-in once-per-day ticket reconcile
 
 python workload_sync.py                        # capture planned_effort/start_date/end_date for open tickets
 python workload_sync.py --older-than-hours 4   # only refresh rows not checked in N hours
@@ -251,6 +253,7 @@ Each entity: read watermark → sync → write sync_log. Failure logs an error a
 | `GET /api/v2/tickets` (list endpoint) | Does NOT return `urgency`, `impact`, `planned_effort`, `planned_start_date`, `planned_end_date`, `resolution_notes`. These require individual ticket GETs. Also never returns deleted (trashed) tickets — those must be fetched via `?filter=deleted` separately. See "Deleted tickets" below. |
 | Deleted tickets | The main list endpoint excludes deleted (trashed) tickets entirely. Without intervention they linger in the replica as phantoms — frozen at pre-deletion state, often appearing "open" with stale department references. Fix: post-sync reconciliation pass (`syncers.reconcile_deleted_tickets`) that pages `GET /api/v2/tickets?filter=deleted` and **hard-DELETEs** matches from `tickets` + their FK children (`conversations`, `ticket_tasks`, `ticket_time_entries`, `ticket_activities`, `ticket_workload`). Runs every cycle. **No `deleted` column** — keeps the replica clean at the source so consumers don't need an `AND deleted=0` filter that can be forgotten (Les, 2026-06-20). If a ticket is restored in FS, normal upsert re-inserts it. The signature of a deleted ticket from the API: GET works (returns it with `deleted=true`), PUT returns 405 "method not allowed". |
 | Workload Management fields (`planned_effort`, `planned_start_date`, `planned_end_date`) | Updating these fields does **not** bump `updated_at` on the ticket. This means the `updated_since` filter will not pick up changes to these fields unless another field on the ticket also changes. **Captured by `workload_sync.py` (separate script)** writing to the `ticket_workload` table — runs on its own schedule, not part of `replicator.py`. |
+| `requested_for_id` (silent write) | Setting/changing "requested for" via the API does **not** bump `updated_at`, so the incremental `updated_since` filter never re-pulls the row and the replica keeps the stale value indefinitely (same class as the Workload fields; verified 2026-07-08, FS #41430). Unlike the Workload fields, `requested_for_id` **is** returned by the ticket *list* endpoint, so no per-ticket GET is needed to reconcile it. Fix: the continuous loop runs a **full ticket-list reconcile once per calendar day** (`_run_full_ticket_reconcile`, on by default; also fires on the first iteration so a morning restart reconciles immediately). One-shot `--reconcile-tickets` for cron/manual. The reconcile is list-only (like `--full`'s ticket step), writes its own `tickets_full_reconcile` sync_log entry, and does **not** advance the incremental `tickets` watermark, so it never disturbs sub-entity sync. |
 | Problem conversations (`/problems/{id}/conversations`) | Returns 404 on this plan. Detected on first call and skipped. |
 | Conversations / Tasks / Time Entries / Activities | No `updated_since` filter. Re-fetched per parent record on every incremental run. Activities additionally have no `id` field in the API response, so a surrogate IDENTITY PK is used. |
 | Agents / Requesters / Groups / Departments / Locations | No `updated_since` filter. Full reload on `--full` only. |
@@ -294,6 +297,9 @@ Fetches 300 newest tickets/problems/changes/releases (1 API page each), writes a
 ### TRUNCATE → DELETE FROM
 SQL Server does not allow `TRUNCATE TABLE` on a table referenced by FK constraints, even if the child tables are empty. `--truncate` uses `DELETE FROM` instead.
 
+### Daily ticket reconcile (silent-write fields)
+Some ticket fields can change in FS without bumping `updated_at` — notably `requested_for_id` (verified 2026-07-08, FS #41430) — so the incremental `updated_since` filter never re-pulls them and the replica drifts. `_run_full_ticket_reconcile` in `replicator.py` closes this: a full pass over the ticket **list** endpoint (`fetch_details=False`, exactly like `--full`'s ticket step — no per-ticket GETs, detail columns preserved) that upserts every ticket row and so overwrites the stale silent-write columns. It runs **once per calendar day** inside the continuous loop (on by default; fires on the first iteration too, so the manual morning restart reconciles immediately) and is available one-shot via `--reconcile-tickets` (for cron / manual). It executes **after** the incremental cycle and writes a **separate `tickets_full_reconcile` sync_log entry** — it deliberately does **not** advance the incremental `tickets` watermark, so it cannot skip sub-entity sync or otherwise interfere with the normal incremental. Distinct from the Workload-fields case, which needs per-ticket GETs and lives in `workload_sync.py` because those fields aren't on the list endpoint; `requested_for_id` *is* on the list endpoint, so a cheap list-only scan suffices. `--no-daily-ticket-reconcile` disables it.
+
 ---
 
 ## Rate Limiting
@@ -309,7 +315,7 @@ Freshservice enforces API rate limits. When hit (HTTP 429), the code reads `Retr
 
 | Entity | Strategy |
 |---|---|
-| Tickets | `updated_since` watermark — only changed tickets fetched via list endpoint |
+| Tickets | `updated_since` watermark — only changed tickets fetched via list endpoint. **Plus** a full list-endpoint reconcile once per calendar day (`_run_full_ticket_reconcile`) to catch silent-write fields like `requested_for_id` that don't bump `updated_at`; writes its own `tickets_full_reconcile` sync_log entry, leaves the incremental watermark alone. |
 | Workload fields (planned_*) | Captured by `workload_sync.py` into `ticket_workload` table — separate process, own schedule |
 | Conversations / Tasks / Time Entries / Activities | Re-fetched for tickets that appeared in the ticket sync window |
 | Associations / Asset links | Captured from the ticket detail GET (`include=related_tickets,assets`) for tickets in the sync window — DELETE+re-INSERT per ticket. Skipped on `--full`/`--test` (no detail). |
